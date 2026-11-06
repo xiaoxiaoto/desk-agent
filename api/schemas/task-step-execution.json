@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wecom-use.local/schemas/task-step-execution-v2.json",
+  "title": "TaskStepExecution",
+  "type": "object",
+  "required": ["step_id", "sequence", "attempt", "instruction", "status", "verification", "output", "error"],
+  "properties": {
+    "step_id": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "attempt": { "type": "integer", "minimum": 1 },
+    "instruction": { "$ref": "https://wecom-use.local/schemas/task-instruction-v1.json" },
+    "status": { "$ref": "https://wecom-use.local/schemas/execution-status-v1.json" },
+    "verification": {
+      "type": "object",
+      "required": ["status", "evidence_ref"],
+      "properties": {
+        "status": { "$ref": "https://wecom-use.local/schemas/verification-status-v1.json" },
+        "evidence_ref": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "output": {
+      "type": ["object", "null"],
+      "description": "capture_app_window returns path and capture_id. locate_app_window_objects returns capture_id, image_size and predictions with original image-pixel coords; it does not automatically add screen coordinates. convert_app_window_coordinates returns capture_id, window_bounds_points [x,y,width,height], screen_coordinate_space macos_global_top_left_points_at_capture and boxes with image_bounds_pixels, screen_bounds_points and screen_center_points. Points are capture-time macOS global top-left logical points, potentially negative, not authorization to click. References expire after 300 seconds; pre-existing screenshots have no capture record. Successful activate_app_element returns {\"activated\":true}; a separately reported verification status of not_performed is not a claim of independent protocol-level verification. Failure after dispatch or inability to establish a state transition is unknown, not a safe retry. Read-only diagnose_app_element returns {\"diagnostic_code\":\"matched\"} on a current match; this neither dispatches input nor authorizes later activation."
+    },
+    "error": { "oneOf": [{ "$ref": "https://wecom-use.local/schemas/task-error-v2.json" }, { "type": "null" }] }
+  }
+}

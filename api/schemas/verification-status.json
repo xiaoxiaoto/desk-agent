@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wecom-use.local/schemas/verification-status-v1.json",
+  "title": "VerificationStatus",
+  "type": "string",
+  "enum": ["not_performed", "verified", "failed", "unknown"]
+}

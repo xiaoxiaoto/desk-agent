@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wecom-use.local/schemas/execution-status-v1.json",
+  "title": "ExecutionStatus",
+  "type": "string",
+  "enum": ["created", "validated", "planned", "awaiting_approval", "running", "verifying", "completed", "failed", "cancelled", "unknown"]
+}

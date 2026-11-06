@@ -1,0 +1,211 @@
+openapi: 3.1.0
+info:
+  title: DeskAgent Local API
+  version: 1.0.0
+  description: Local-first API contract. Business capabilities are exposed only when the runtime reports an authorized, implemented channel.
+servers:
+  - url: http://127.0.0.1:17890/api/v1
+    description: Loopback only; remote binding is not part of this contract.
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      responses:
+        '200':
+          description: Runtime is responsive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { const: ok }
+                  version: { type: string }
+        default: { $ref: '#/components/responses/Error' }
+  /system/info:
+    get:
+      operationId: getSystemInfo
+      responses:
+        '200':
+          description: Non-sensitive runtime and host information.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [app_version, os, architecture]
+                properties:
+                  app_version: { type: string }
+                  os: { type: string }
+                  architecture: { type: string }
+        default: { $ref: '#/components/responses/Error' }
+  /capabilities:
+    get:
+      operationId: listCapabilities
+      responses:
+        '200':
+          description: Read-only instruction capability catalog. WeCom launch, window centering, app window capture, local window object localization and element activation depend on the implemented channel and runtime prerequisites; search, chat, send, and message verification are unavailable.
+          content:
+            application/json:
+              schema: { $ref: './schemas/capability-catalog.json' }
+        default: { $ref: '#/components/responses/Error' }
+  /rpa:
+    post:
+      operationId: routeRpaTask
+      security: [{ localToken: [] }]
+      description: >-
+        Synchronous terminal execution only. The required string `protocol_version` must be `"1"`.
+        Supply `app: wecom` and either non-empty natural-language `messages` (each non-blank)
+        or non-empty exact `instructions`. When instructions are present they are authoritative
+        and messages are ignored; empty instructions are rejected. WeCom window centering uses
+        the macOS GUI channel and requires an existing window and Accessibility permission; it
+        does not launch or switch applications. `capture_app_window` and natural language
+        `截取企业微信窗口` capture only the selected WeCom window. Exactly one WeCom process
+        must be running; the sole Accessibility window or, when there are multiple, its main
+        window is selected and must map uniquely to a visible Core Graphics window by PID and
+        geometry. Ambiguity fails; no screen rectangle or occluding windows are captured.
+        macOS Screen Recording and Accessibility permissions are required. An explicit local grant
+        binds app `wecom`, capability and scope `desktop.window.capture`, route `macos_gui`,
+        target `main_or_single_app_window`, effect `capture`, parameters `none:v1`. Prior
+        screen or window grants do not authorize this operation. An authorized request may invoke
+        the Screen Recording permission request when absent; the OS controls prompting and a
+        restart may be required. Capability discovery never requests permission.
+        The sensitive PNG path is in a private `0700` directory under `~/.desk-agent`;
+        the unique file has mode `0600` and its contents are not logged.
+        Exact instruction `locate_app_window_objects` takes `params.objects`, an ordered array
+        of 1–16 nonblank strings of at most 256 UTF-8 bytes each; natural-language planning
+        is unavailable. It captures a fresh window image and sends it, resized and JPEG encoded,
+        to the fixed local endpoint `http://127.0.0.1/v1/chat/completions`, model
+        `wevisone-vl-4b`, with `wevisone_task` `referring`, once per object in order.
+        A separate explicit grant binds app `wecom`, capability and scope `vision.window.locate`,
+        route `local_vision`, target `main_or_single_app_window`, effect `local_inference`,
+        and parameters `objects-sha256:<digest>`, where digest is lowercase SHA-256 of the UTF-8
+        compact `serde_json` serialization of the exact ordered objects array. Capture and vision
+        grants are rechecked before each respective disclosure. Capture returns `capture_id`;
+        localization returns `capture_id`, `image_size` and ordered objects whose predictions
+        contain `label` and `coords` in original captured-image pixels, without screen coordinates.
+        Standalone exact `convert_app_window_coordinates` accepts a canonical UUID `capture_id`
+        and 1–100 finite image-pixel boxes `[x1,y1,x2,y2]`, strictly ordered and inside the image.
+        It uses only the private capture record, not an arbitrary path, and performs no capture,
+        inference, permission escalation or click. Records expire after 300 seconds; existing
+        screenshots without records cannot be converted. Changed target window, display or
+        geometry fails closed. The explicit grant binds app `wecom`, capability and scope
+        `desktop.window.coordinates.convert`, route `macos_gui`, target
+        `main_or_single_app_window`, effect `read_geometry` and parameters
+        `conversion-sha256:<digest>`, the lowercase SHA-256 of compact UTF-8 `serde_json`
+        serialization of a struct with fields `capture_id` then `boxes` (f64 values use
+        serde_json normalization, e.g. 1.0). Grant is rechecked before dispatch.
+        Output includes `capture_id`, `window_bounds_points` `[x,y,width,height]`,
+        `screen_coordinate_space` `macos_global_top_left_points_at_capture`, and ordered
+        `boxes` containing `image_bounds_pixels`, `screen_bounds_points` and
+        `screen_center_points`. Each axis scales image pixels by the capture-time window
+        point dimension divided by image pixel dimension, without an assumed Retina factor.
+        Global top-left logical points may be negative. These are snapshots, not current UI or
+        action authorization: matching geometry cannot rule out movement and return, or later
+        changes. Predictions are untrusted; independently revalidate before acting.
+        Standalone exact `activate_app_element` takes finite `point` [x,y] in global
+        macOS top-left logical points, and nonempty `expected_role` and `expected_label`
+        (each at most 256 UTF-8 bytes). The caller supplies the exact AXRole and AXTitle,
+        not a model's untrusted prediction. The point must be within the live selected
+        WeCom window. macOS Accessibility permission is required; activation does not
+        capture a screenshot or require Screen Recording permission. Immediately before
+        input the live AX hit is checked against the exact role and title and selected
+        WeCom window, which must be frontmost and unobstructed; no app is launched or activated.
+        This is not arbitrary screen input or natural-language planning.
+        Missing AXRole or AXTitle fails closed; AXDescription is not a substitute.
+        Each coordinate must be exactly representable as f32 (integer points are an example);
+        values are not automatically rounded, and callers must not guess pixel-to-point scaling.
+        A separate single-use explicit grant binds app `wecom`, capability and scope
+        `wecom.element.activate`, route `macos_gui`, target `main_or_single_app_window`,
+        effect `activate_element`, and `activate-sha256:<digest>`. Digest is lowercase SHA-256
+        of compact UTF-8 serde_json serialization of a struct in field order `point`,
+        `expected_role`, `expected_label`, with f64 formatting (e.g. 1.0).
+        The grant is atomically consumed and audited after preflight, immediately before
+        dispatch; capture or coordinate grants cannot be reused. App and model content cannot
+        authorize. The adapter requires a newly observed focus or selection transition after
+        the click; missing or unchanged evidence, dispatch failure, or subsequent audit failure
+        means unknown outcome. Never automatically retry a dispatched action. Success returns
+        `{"activated":true}`; the separate verification status remains `not_performed`.
+        After authorization, a failed activation preflight may include a fixed
+        `diagnostic_code` in a `capability_unavailable` TaskError, with phase `validation`,
+        outcome `not_dispatched`, and `retryable: false`. It never includes actual role, title,
+        label, coordinates, screenshot or raw OS errors and is not a retrospective diagnosis
+        or a diagnosis after dispatch. See the TaskError schema and protocol for the catalog.
+        Standalone exact `diagnose_app_element` accepts the same parameters and performs
+        read-only current preflight checks, without input dispatch or consuming an activation
+        grant. It requires a separate explicit local grant for capability and scope
+        `wecom.element.diagnose`, route `macos_gui`, target `main_or_single_app_window`,
+        effect `inspect_element`, and `diagnose-sha256:<digest>`, using the same ordered
+        parameter serialization as activation. A match returns `{"diagnostic_code":"matched"}`;
+        a failed check returns a TaskError with a fixed diagnostic code. This is a current
+        observation, not proof of a prior failure or authorization for a later action.
+        Other cataloged instructions may be unavailable. Completion does not imply independent verification. Observation, cancellation, approval,
+        and recovery have no defined wire contract and are not exposed here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: './schemas/rpa-request.json' }
+            examples:
+              exact:
+                value:
+                  protocol_version: "1"
+                  app: wecom
+                  instructions: [{ action: launch_wecom }]
+              centerWindow:
+                value:
+                  protocol_version: "1"
+                  app: wecom
+                  instructions: [{ action: center_wecom_window }]
+              captureAppWindow:
+                value:
+                  protocol_version: "1"
+                  app: wecom
+                  instructions: [{ action: capture_app_window }]
+              locateAppWindowObjects:
+                value:
+                  protocol_version: "1"
+                  app: wecom
+                  instructions: [{ action: locate_app_window_objects, params: { objects: ["search button", "chat list"] } }]
+              convertAppWindowCoordinates:
+                value:
+                  protocol_version: "1"
+                  app: wecom
+                  instructions: [{ action: convert_app_window_coordinates, params: { capture_id: "123e4567-e89b-12d3-a456-426614174000", boxes: [[10.0, 20.0, 30.0, 40.0]] } }]
+              activateAppElement:
+                value:
+                  protocol_version: "1"
+                  app: wecom
+                  instructions: [{ action: activate_app_element, params: { point: [100.0, 200.0], expected_role: "AXButton", expected_label: "Search" } }]
+              natural:
+                value:
+                  protocol_version: "1"
+                  app: wecom
+                  messages: ["请打开企业微信"]
+      responses:
+        '200':
+          description: Terminal task response with ordered steps and separate verification status. Completion does not imply independent verification.
+          content:
+            application/json:
+              schema: { $ref: './schemas/rpa-response.json' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+        default: { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    localToken:
+      type: http
+      scheme: bearer
+      description: Per-installation bearer credential in the macOS Keychain. Scope and approval policies are not implemented.
+  responses:
+    Error:
+      description: Stable structured error; response message contains no secret material.
+      content:
+        application/json:
+          schema: { $ref: './schemas/error.json' }

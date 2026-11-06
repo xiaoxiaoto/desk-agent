@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wecom-use.local/schemas/task-error-v2.json",
+  "title": "TaskError",
+  "type": "object",
+  "required": ["code", "message", "request_id", "task_id", "operation_id", "phase", "outcome", "retryable"],
+  "properties": {
+    "code": { "enum": ["invalid_request", "unsupported_version", "unauthorized", "forbidden", "approval_required", "ambiguous_target", "not_found", "conflict", "idempotency_conflict", "capability_unavailable", "rate_limited", "operation_failed", "outcome_unknown", "internal_error"] },
+    "message": { "type": "string", "description": "Sanitized; excludes credentials, raw inputs, message content, screenshots and unfiltered stack traces." },
+    "request_id": { "type": "string", "minLength": 1 },
+    "task_id": { "type": ["string", "null"], "minLength": 1 },
+    "operation_id": { "type": ["string", "null"], "minLength": 1 },
+    "phase": { "type": "string", "minLength": 1 },
+    "outcome": { "enum": ["not_dispatched", "known_failed", "known_succeeded", "unknown"] },
+    "retryable": { "type": "boolean" },
+    "diagnostic_code": {
+      "type": "string",
+      "enum": ["accessibility_unavailable", "target_window_unavailable", "coordinate_precision_unsupported", "point_outside_target_window", "target_not_frontmost", "point_obscured", "hit_test_unavailable", "target_element_mismatch", "accessibility_role_unavailable", "accessibility_role_mismatch", "accessibility_title_unavailable", "accessibility_title_mismatch", "target_changed", "preflight_unavailable"],
+      "description": "Optional fixed diagnostic for an authorized activation preflight or read-only element diagnosis failure, only for capability_unavailable with validation phase, not_dispatched outcome and retryable false. Contains no actual role, title, label, coordinates, screenshot or raw OS error; omitted for other errors and after dispatch."
+    },
+    "retry_after_ms": { "type": "integer", "minimum": 0 }
+  }
+}

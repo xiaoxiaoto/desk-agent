@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wecom-use.local/schemas/error-v2.json",
+  "title": "TaskErrorResponse",
+  "type": "object",
+  "required": ["error"],
+  "properties": {
+    "error": { "$ref": "https://wecom-use.local/schemas/task-error-v2.json" }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wecom-use.local/schemas/capability-v2.json",
+  "title": "Capability",
+  "type": "object",
+  "required": ["capability_id", "instruction_action", "app", "schema_version", "input_schema_ref", "available", "required_scopes", "channels", "risk", "confirmation", "verification", "prerequisites", "unavailable_reason"],
+  "properties": {
+    "capability_id": { "type": "string", "minLength": 1 },
+    "instruction_action": { "type": "string", "minLength": 1 },
+    "app": { "type": "string", "minLength": 1 },
+    "schema_version": { "type": "string", "minLength": 1 },
+    "input_schema_ref": { "type": "string", "minLength": 1 },
+    "available": { "type": "boolean" },
+    "required_scopes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "channels": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "risk": { "type": "string" },
+    "confirmation": { "type": "string" },
+    "verification": { "type": "string" },
+    "prerequisites": { "type": "array", "items": { "type": "string" } },
+    "unavailable_reason": { "type": ["string", "null"] }
+  },
+  "allOf": [
+    { "if": { "properties": { "available": { "const": true } }, "required": ["available"] }, "then": { "properties": { "unavailable_reason": { "type": "null" } } }, "else": { "properties": { "unavailable_reason": { "type": "string", "minLength": 1 } } } }
+  ]
+}

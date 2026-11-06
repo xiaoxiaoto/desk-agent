@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wecom-use.local/schemas/rpa-response-v2.json",
+  "title": "TaskResponse",
+  "type": "object",
+  "required": ["protocol_version", "app", "execution"],
+  "properties": {
+    "protocol_version": { "type": "string", "const": "1" },
+    "app": { "const": "wecom" },
+    "execution": { "$ref": "https://wecom-use.local/schemas/task-execution-v2.json" }
+  }
+}

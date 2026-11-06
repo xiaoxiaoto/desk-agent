@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wecom-use.local/schemas/capability-catalog-v2.json",
+  "title": "CapabilityCatalog",
+  "type": "object",
+  "required": ["protocol_version", "capabilities"],
+  "properties": {
+    "protocol_version": { "type": "string", "const": "1" },
+    "capabilities": { "type": "array", "items": { "$ref": "https://wecom-use.local/schemas/capability-v2.json" } }
+  }
+}

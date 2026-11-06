@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wecom-use.local/schemas/task-execution-v2.json",
+  "title": "TaskExecution",
+  "type": "object",
+  "required": ["request_id", "task_id", "operation_id", "trace_id", "mode", "status", "steps"],
+  "properties": {
+    "request_id": { "type": "string", "minLength": 1 },
+    "task_id": { "type": "string", "minLength": 1 },
+    "operation_id": { "type": "string", "minLength": 1 },
+    "trace_id": { "type": "string", "minLength": 1 },
+    "mode": { "enum": ["natural_language", "exact_instruction"] },
+    "status": { "$ref": "https://wecom-use.local/schemas/execution-status-v1.json" },
+    "steps": { "type": "array", "items": { "$ref": "https://wecom-use.local/schemas/task-step-execution-v2.json" } }
+  }
+}
