@@ -29,7 +29,7 @@ impl eframe::App for DeskAgentApp {
                     protocol_version: crate::kernel::task::PROTOCOL_VERSION.to_owned(),
                     app: WECOM_APP_ID.to_owned(),
                     messages: Vec::new(),
-                    instructions: Some(vec![TaskInstruction::LaunchWecom]),
+                    instructions: Some(vec![TaskInstruction::LaunchApp]),
                 }));
             }
             ui.label(&self.status);

@@ -41,7 +41,7 @@ async fn handle_rpa(
             rpa_error(
                 StatusCode::BAD_REQUEST,
                 TaskErrorCode::InvalidRequest,
-                "The request must identify app 'wecom' and provide messages or non-empty instructions.",
+                "The request must identify a valid app ID and provide messages or non-empty instructions.",
             )
         }
     })?;
@@ -58,20 +58,21 @@ async fn handle_rpa(
         ),
     })?;
     let mode = input.mode();
+    let app = input.app().to_owned();
     let request_id = uuid::Uuid::new_v4().to_string();
     let instruction = input.resolve_instruction().expect("preflight resolves supported input");
     match invoke_task(database.as_deref(), &request_id, input, launch_wecom, center_wecom_window).await {
         Ok((_, result)) => {
             let output = if let Some(output) = result {
                 output
-            } else if matches!(instruction, crate::kernel::task::TaskInstruction::LaunchWecom) {
+            } else if matches!(instruction, crate::kernel::task::TaskInstruction::LaunchApp) {
                 serde_json::json!({ "open_command_succeeded": true })
             } else {
                 serde_json::json!({ "window_position_submitted": true })
             };
-            Ok(Json(TaskResponse::completed(request_id, mode, instruction, output)))
+            Ok(Json(TaskResponse::completed(request_id, &app, mode, instruction, output)))
         },
-        Err(InvokeError::OutcomeUnknown) => Ok(Json(TaskResponse::unknown(request_id, mode, instruction))),
+        Err(InvokeError::OutcomeUnknown) => Ok(Json(TaskResponse::unknown(request_id, &app, mode, instruction))),
         Err(error) => {
             Err(invoke_error_response(error, request_id))
         }
@@ -83,7 +84,7 @@ pub(super) fn invoke_error(error: InvokeError) -> (StatusCode, TaskErrorCode, &'
         InvokeError::Forbidden => (StatusCode::FORBIDDEN, TaskErrorCode::Forbidden, "The requested capability is not explicitly authorized."),
         InvokeError::AuditUnavailable => (StatusCode::SERVICE_UNAVAILABLE, TaskErrorCode::CapabilityUnavailable, "Authorization or audit storage is unavailable; operation not dispatched."),
         InvokeError::CapabilityUnavailable => (StatusCode::SERVICE_UNAVAILABLE, TaskErrorCode::CapabilityUnavailable, "The requested capability prerequisites are not met."),
-        InvokeError::ActivationPreflight(_) => (StatusCode::SERVICE_UNAVAILABLE, TaskErrorCode::CapabilityUnavailable, "App element preflight prerequisites are not met; operation not dispatched."),
+        InvokeError::ActivationPreflight(_) => (StatusCode::SERVICE_UNAVAILABLE, TaskErrorCode::CapabilityUnavailable, "Accessibility target preflight prerequisites are not met; operation not dispatched."),
         InvokeError::InvalidInput => (StatusCode::UNPROCESSABLE_ENTITY, TaskErrorCode::InvalidRequest, "Task instruction is not executable."),
         InvokeError::OutcomeUnknown => (StatusCode::INTERNAL_SERVER_ERROR, TaskErrorCode::OutcomeUnknown, "Dispatch outcome is unknown."),
     }

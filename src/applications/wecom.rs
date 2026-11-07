@@ -1,5 +1,5 @@
 use crate::kernel::capability::{Capability, CapabilityChannel, CapabilityStatus};
-use crate::kernel::task::ActivationDiagnostic;
+use crate::kernel::task::{ActivationDiagnostic, valid_app_input};
 use std::process::Command;
 
 pub fn launch_capability() -> Capability {
@@ -193,11 +193,14 @@ pub fn app_element_activation_capability() -> Capability {
         prerequisites: vec![
             "macOS Accessibility permission for the controlling process",
             "One running WeCom instance with a visible, frontmost main or single window",
-            "An exact accessibility role and title at the requested screen point",
+            "An exact accessibility role at the requested screen point, with an optional exact semantic accessibility name",
         ],
         limitations: vec![
-            "Does not launch, activate, or raise WeCom; an obscured point is rejected.",
-            "Coordinates must be exactly representable as accessibility hit-test floats; the label is AXTitle.",
+            "Does not launch, activate, or raise WeCom; system-wide accessibility hit testing must identify the target window and element.",
+            "Requires a visible, opaque target window; overlays absent from accessibility hit testing cannot always be detected.",
+            "Coordinates must be exactly representable as accessibility hit-test floats.",
+            "With an expected label, the name is nonempty AXTitle, otherwise the same-window AXTitleUIElement's AXStaticText title or value; missing names are rejected.",
+            "Without an expected label, authorization identifies only the exact point and role, not the message or other content at that point.",
             "A click is verified only when the target's focused or selected state changes from false to true.",
         ],
         reason,
@@ -205,7 +208,8 @@ pub fn app_element_activation_capability() -> Capability {
 }
 
 /// Validate a point-specific activation without dispatching input.
-pub fn preflight_app_element(point: [f64; 2], expected_role: &str, expected_label: &str) -> Result<(), ActivationDiagnostic> {
+/// `None` explicitly selects coordinate-and-role identity without reading a name.
+pub fn preflight_app_element(point: [f64; 2], expected_role: &str, expected_label: Option<&str>) -> Result<(), ActivationDiagnostic> {
     #[cfg(target_os = "macos")]
     {
         macos_desktop::preflight_element(point, expected_role, expected_label)
@@ -218,7 +222,8 @@ pub fn preflight_app_element(point: [f64; 2], expected_role: &str, expected_labe
 }
 
 /// Revalidate and click the exact authorized element, then require evidence of a state transition.
-pub fn activate_app_element(point: [f64; 2], expected_role: &str, expected_label: &str) -> anyhow::Result<()> {
+/// `None` explicitly selects coordinate-and-role identity without reading a name.
+pub fn activate_app_element(point: [f64; 2], expected_role: &str, expected_label: Option<&str>) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
         macos_desktop::activate_element(point, expected_role, expected_label)
@@ -227,6 +232,75 @@ pub fn activate_app_element(point: [f64; 2], expected_role: &str, expected_label
     {
         let _ = (point, expected_role, expected_label);
         anyhow::bail!("WeCom element activation is supported only on macOS")
+    }
+}
+
+/// Availability is advisory: the current WeCom layout must still pass the live selector.
+pub fn wecom_search_query_capability() -> Capability {
+    #[cfg(target_os = "macos")]
+    let reason = if !macos_desktop::trusted() {
+        Some("macOS Accessibility permission is required for the runtime")
+    } else if macos_desktop::search_target_available().is_err() {
+        Some("A visible, opaque, frontmost WeCom main or single window is required")
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "macos"))]
+    let reason = Some("WeCom search field input is supported only on macOS");
+    Capability {
+        id: "wecom.search.query.set",
+        status: if reason.is_none() { CapabilityStatus::Available } else { CapabilityStatus::Unavailable },
+        channel: CapabilityChannel::MacosGui,
+        required_scopes: vec!["wecom.search.query.set"],
+        prerequisites: vec![
+            "macOS Accessibility permission for the controlling process; no Screen Recording permission is required",
+            "One running WeCom instance with a visible, opaque, frontmost main or single window",
+            "An enabled, focus-writable and value-writable AXTextField at the exact authorized screen point",
+        ],
+        limitations: vec![
+            "Supports only the current WeCom header topology, not arbitrary applications or generic text fields: AXTextField / AXSplitGroup / AXSplitGroup / selected AXWindow.",
+            "The field must be wholly within the first 80 logical points of the window, at most 60 points high, and inside the left column separated by a vertical AXSplitter from every other header AXTextField; other header fields on that side or a missing divider are rejected.",
+            "Selection is limited to the observed ancestor chain and direct split-group children, not a generic whole-window search; ambiguous or unreadable topology and child lists over 2048 elements are rejected.",
+            "Replaces AXValue exactly after setting and verifying AX focus; never clicks, types, presses Enter, or sends a message.",
+            "Requires exact float-representable global top-left logical coordinates and repeated system-wide hit identity; non-accessibility overlays cannot always be detected.",
+            "Reads back AXValue for up to 500 ms without retrying focus or writes; this is not independent visual verification.",
+        ],
+        reason,
+    }
+}
+
+/// Read-only validation; must be called only after the separate search-input grant.
+pub fn preflight_wecom_search_field_input(point: [f64; 2], text: &str) -> Result<(), ActivationDiagnostic> {
+    if point.iter().all(|value| value.is_finite())
+        && !point.iter().all(|value| (*value as f32) as f64 == *value) {
+        return Err(ActivationDiagnostic::CoordinatePrecisionUnsupported);
+    }
+    if !valid_app_input(&point, text) {
+        return Err(ActivationDiagnostic::PreflightUnavailable);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_desktop::preflight_search_query(point)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = point;
+        Err(ActivationDiagnostic::PreflightUnavailable)
+    }
+}
+
+/// A single AX focus request followed by a single exact AXValue replacement.
+/// Any error after dispatch may leave focus or the value changed; never retry it.
+pub fn input_wecom_search_field_text(point: [f64; 2], text: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(valid_app_input(&point, text), "Invalid WeCom search field text or point");
+    #[cfg(target_os = "macos")]
+    {
+        macos_desktop::set_search_query(point, text)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = point;
+        anyhow::bail!("WeCom search field input is supported only on macOS")
     }
 }
 
@@ -240,7 +314,7 @@ mod macos_desktop {
     use std::io::{Read, Write};
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     type Object = *const c_void;
     type Element = *const c_void;
@@ -254,21 +328,25 @@ mod macos_desktop {
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct Rect { origin: Point, size: Size }
+    #[repr(C)]
+    struct CFRange { location: isize, length: isize }
 
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
         fn CFStringCreateWithCString(alloc: Object, string: *const c_char, encoding: u32) -> Object;
         fn CFStringCreateWithBytes(alloc: Object, bytes: *const u8, length: isize, encoding: u32, external: bool) -> Object;
         fn CFStringGetTypeID() -> usize;
+        fn CFStringGetLength(string: Object) -> isize;
+        fn CFStringGetBytes(string: Object, range: CFRange, encoding: u32, loss: u8, external: bool,
+            buffer: *mut u8, capacity: isize, used: *mut isize) -> isize;
         fn CFBooleanGetTypeID() -> usize;
         fn CFBooleanGetValue(value: Object) -> bool;
         fn CFArrayGetCount(array: Object) -> isize;
+        fn CFArrayGetTypeID() -> usize;
+        static kCFBooleanTrue: Object;
         fn CFArrayGetValueAtIndex(array: Object, index: isize) -> Object;
         fn CFRetain(value: Object) -> Object;
         fn CFRelease(value: Object);
-        fn CFDataCreateMutable(alloc: Object, capacity: isize) -> Object;
-        fn CFDataGetLength(data: Object) -> isize;
-        fn CFDataGetBytePtr(data: Object) -> *const u8;
         fn CFDictionaryGetValue(dictionary: Object, key: Object) -> Object;
         fn CFGetTypeID(value: Object) -> usize;
         fn CFNumberGetTypeID() -> usize;
@@ -281,6 +359,7 @@ mod macos_desktop {
         fn AXIsProcessTrusted() -> bool;
         fn AXUIElementCreateApplication(pid: i32) -> Element;
         fn AXUIElementCreateSystemWide() -> Element;
+        fn AXUIElementGetTypeID() -> usize;
         fn AXUIElementCopyElementAtPosition(element: Element, x: f32, y: f32, result: *mut Element) -> i32;
         fn AXUIElementGetPid(element: Element, pid: *mut i32) -> i32;
         fn AXUIElementCopyAttributeValue(element: Element, attribute: Object, value: *mut Object) -> i32;
@@ -296,27 +375,17 @@ mod macos_desktop {
         fn CGPreflightScreenCaptureAccess() -> bool;
         fn CGRequestScreenCaptureAccess() -> bool;
         fn CGWindowListCopyWindowInfo(options: u32, relative_to: u32) -> Object;
-        fn CGWindowListCreateImage(bounds: Rect, options: u32, window: u32, image_options: u32) -> Object;
         fn CGRectMakeWithDictionaryRepresentation(dictionary: Object, rect: *mut Rect) -> bool;
         fn CGEventCreateMouseEvent(source: Object, event_type: u32, position: Point, button: u32) -> Object;
         fn CGEventSetFlags(event: Object, flags: u64);
         fn CGEventSetIntegerValueField(event: Object, field: u32, value: i64);
         fn CGEventPost(tap: u32, event: Object);
-        static CGRectNull: Rect;
         static kCGWindowOwnerPID: Object;
         static kCGWindowNumber: Object;
         static kCGWindowBounds: Object;
         static kCGWindowLayer: Object;
         static kCGWindowAlpha: Object;
         static kCGWindowSharingState: Object;
-        fn CGImageGetWidth(image: Object) -> usize;
-        fn CGImageGetHeight(image: Object) -> usize;
-    }
-    #[link(name = "ImageIO", kind = "framework")]
-    unsafe extern "C" {
-        fn CGImageDestinationCreateWithData(data: Object, image_type: Object, count: usize, options: Object) -> Object;
-        fn CGImageDestinationAddImage(destination: Object, image: Object, properties: Object);
-        fn CGImageDestinationFinalize(destination: Object) -> bool;
     }
     unsafe extern "C" {
         fn geteuid() -> u32;
@@ -591,16 +660,28 @@ mod macos_desktop {
     type DiagnosticResult<T> = std::result::Result<T, Diagnostic>;
 
     fn frontmost(target: &CaptureTarget) -> DiagnosticResult<()> {
-        let system = owned(unsafe { AXUIElementCreateSystemWide() }, "system accessibility element")
+        let pid = unsafe {
+            let class = objc_getClass(b"NSWorkspace\0".as_ptr().cast());
+            let pool_class = objc_getClass(b"NSAutoreleasePool\0".as_ptr().cast());
+            if class.is_null() || pool_class.is_null() {
+                return Err(Diagnostic::PreflightUnavailable);
+            }
+            let selector = |name: &'static [u8]| sel_registerName(name.as_ptr().cast());
+            let send: unsafe extern "C" fn(Object, Object) -> Object = std::mem::transmute(objc_msgSend as *const ());
+            let send_pid: unsafe extern "C" fn(Object, Object) -> i32 = std::mem::transmute(objc_msgSend as *const ());
+            let pool = send(send(pool_class, selector(b"alloc\0")), selector(b"init\0"));
+            if pool.is_null() { return Err(Diagnostic::PreflightUnavailable); }
+            let workspace = send(class, selector(b"sharedWorkspace\0"));
+            let app = if workspace.is_null() { ptr::null() } else { send(workspace, selector(b"frontmostApplication\0")) };
+            let pid = if app.is_null() { 0 } else { send_pid(app, selector(b"processIdentifier\0")) };
+            let drain: unsafe extern "C" fn(Object, Object) = std::mem::transmute(objc_msgSend as *const ());
+            drain(pool, selector(b"drain\0"));
+            pid
+        };
+        if pid <= 0 { return Err(Diagnostic::PreflightUnavailable); }
+        if pid != target.pid { return Err(Diagnostic::TargetNotFrontmost); }
+        let app = owned(unsafe { AXUIElementCreateApplication(pid) }, "application accessibility element")
             .map_err(|_| Diagnostic::PreflightUnavailable)?;
-        let app = attribute(system.0, b"AXFocusedApplication\0").map_err(|_| Diagnostic::PreflightUnavailable)?;
-        let mut pid = 0;
-        if unsafe { AXUIElementGetPid(app.0, &mut pid) } != 0 {
-            return Err(Diagnostic::PreflightUnavailable);
-        }
-        if pid != target.pid {
-            return Err(Diagnostic::TargetNotFrontmost);
-        }
         let window = attribute(app.0, b"AXFocusedWindow\0").map_err(|_| Diagnostic::PreflightUnavailable)?;
         if !unsafe { CFEqual(window.0, target.window.0) } {
             return Err(Diagnostic::TargetNotFrontmost);
@@ -616,81 +697,204 @@ mod macos_desktop {
         frontmost(&target)
     }
 
-    // The on-screen list is ordered front to back. Treat every visible window
-    // above the selected one as an occluder, including other WeCom windows,
-    // panels, and transparent-looking windows with nonzero global alpha.
-    fn unobstructed(target: &CaptureTarget, point: Point) -> DiagnosticResult<()> {
+    // Confirm only the selected window's live visibility and opacity here.
+    // Other windows' bounding rectangles do not establish input ownership:
+    // system-wide AX hit testing below does. Non-AX overlays may be invisible
+    // to that hit test, so this is not a guarantee against every overlay.
+    fn confirm_target_opaque(target: &CaptureTarget) -> DiagnosticResult<()> {
         let windows = owned(unsafe { CGWindowListCopyWindowInfo(1, 0) }, "on-screen window list")
             .map_err(|_| Diagnostic::PreflightUnavailable)?;
         let count = unsafe { CFArrayGetCount(windows.0) };
         for index in 0..count {
             let entry = unsafe { CFArrayGetValueAtIndex(windows.0, index) };
             if entry.is_null() || unsafe { CFGetTypeID(entry) != CFDictionaryGetTypeID() } {
-                return Err(Diagnostic::PreflightUnavailable);
-            }
-            let id = number(entry, unsafe { kCGWindowNumber }).ok_or(Diagnostic::PreflightUnavailable)?;
-            let alpha = number(entry, unsafe { kCGWindowAlpha }).ok_or(Diagnostic::PreflightUnavailable)?;
-            if !(0.0..=1.0).contains(&alpha) {
-                return Err(Diagnostic::PreflightUnavailable);
-            }
-            if id == target.number as f64 {
-                return if alpha == 1.0 { Ok(()) } else { Err(Diagnostic::PreflightUnavailable) };
-            }
-            if alpha == 0.0 {
                 continue;
             }
-            let bounds = unsafe { CFDictionaryGetValue(entry, kCGWindowBounds) };
-            if bounds.is_null() || unsafe { CFGetTypeID(bounds) != CFDictionaryGetTypeID() } {
-                return Err(Diagnostic::PreflightUnavailable);
+            if number(entry, unsafe { kCGWindowNumber }) != Some(target.number as f64) {
+                continue;
             }
-            let mut rect = Rect { origin: Point { x: 0.0, y: 0.0 }, size: Size { width: 0.0, height: 0.0 } };
-            if !unsafe { CGRectMakeWithDictionaryRepresentation(bounds, &mut rect) }
-                || !rect.origin.x.is_finite() || !rect.origin.y.is_finite()
-                || !rect.size.width.is_finite() || !rect.size.height.is_finite()
-                || rect.size.width < 0.0 || rect.size.height < 0.0
-                || !(rect.origin.x + rect.size.width).is_finite()
-                || !(rect.origin.y + rect.size.height).is_finite() {
-                return Err(Diagnostic::PreflightUnavailable);
-            }
-            if point.x >= rect.origin.x && point.x < rect.origin.x + rect.size.width
-                && point.y >= rect.origin.y && point.y < rect.origin.y + rect.size.height {
-                return Err(Diagnostic::PointObscured);
-            }
+            return if number(entry, unsafe { kCGWindowOwnerPID }) == Some(target.pid as f64)
+                && number(entry, unsafe { kCGWindowAlpha }) == Some(1.0) {
+                Ok(())
+            } else {
+                Err(Diagnostic::PreflightUnavailable)
+            };
         }
         Err(Diagnostic::TargetWindowUnavailable)
     }
 
-    fn matches_string_attribute(element: Element, name: &'static [u8], expected: &str) -> Result<bool> {
-        let actual = attribute(element, name)?;
-        ensure!(unsafe { CFGetTypeID(actual.0) == CFStringGetTypeID() },
+    fn matches_string_value(actual: Object, expected: &str) -> Result<bool> {
+        ensure!(unsafe { CFGetTypeID(actual) == CFStringGetTypeID() },
             "Invalid accessibility string attribute");
         let expected = owned(unsafe {
             CFStringCreateWithBytes(ptr::null(), expected.as_ptr(), expected.len() as isize, 0x0800_0100, false)
         }, "expected accessibility string")?;
-        Ok(unsafe { CFEqual(actual.0, expected.0) })
+        Ok(unsafe { CFEqual(actual, expected.0) })
     }
 
-    fn element_at_point(point: [f64; 2], role: &str, label: &str) -> DiagnosticResult<Owned> {
-        if !trusted() {
-            return Err(Diagnostic::AccessibilityUnavailable);
+    fn matches_string_attribute(element: Element, name: &'static [u8], expected: &str) -> Result<bool> {
+        let actual = attribute(element, name)?;
+        matches_string_value(actual.0, expected)
+    }
+
+    enum NameAttribute<T> {
+        MissingOrEmpty,
+        Nonempty(T),
+        Invalid,
+    }
+
+    // A present, nonempty name is authoritative even when it will not match
+    // the caller's expected label. Invalid attribute types are not absence.
+    fn select_name<T>(attribute: NameAttribute<T>, fallback: impl FnOnce() -> DiagnosticResult<T>) -> DiagnosticResult<T> {
+        match attribute {
+            NameAttribute::Nonempty(name) => Ok(name),
+            NameAttribute::MissingOrEmpty => fallback(),
+            NameAttribute::Invalid => Err(Diagnostic::AccessibilityTitleUnavailable),
         }
-        if !point.iter().all(|value| value.is_finite())
-            || role.is_empty() || role.len() > 256 || label.is_empty() || label.len() > 256 {
-            return Err(Diagnostic::PreflightUnavailable);
+    }
+
+    fn static_text_name<T>(
+        is_static_text: bool,
+        title: impl FnOnce() -> DiagnosticResult<NameAttribute<T>>,
+        value: impl FnOnce() -> DiagnosticResult<NameAttribute<T>>,
+    ) -> DiagnosticResult<T> {
+        if !is_static_text {
+            return Err(Diagnostic::AccessibilityTitleUnavailable);
         }
-        // AX hit testing accepts floats; refuse rounding that could hit a
-        // different element from the exact point sent to Core Graphics.
-        if !point.iter().all(|value| (*value as f32) as f64 == *value) {
-            return Err(Diagnostic::CoordinatePrecisionUnsupported);
+        select_name(title()?, || {
+            select_name(value()?, || Err(Diagnostic::AccessibilityTitleUnavailable))
+        })
+    }
+
+    #[cfg(test)]
+    mod accessible_name_tests {
+        use super::{Diagnostic, DiagnosticResult, NameAttribute, select_name, static_text_name};
+
+        #[test]
+        fn direct_name_is_authoritative_even_when_expected_label_differs() {
+            let selected = select_name(NameAttribute::Nonempty("Archive"), || {
+                panic!("A nonempty direct title must not consult a matching related label");
+            }).unwrap();
+            assert_eq!(selected, "Archive");
+            assert_ne!(selected, "Messages");
         }
-        let target = window_target(false).map_err(|_| Diagnostic::TargetWindowUnavailable)?;
-        let [x, y, width, height] = bounds(target.position, target.size);
-        if !(point[0] >= x && point[0] < x + width && point[1] >= y && point[1] < y + height) {
-            return Err(Diagnostic::PointOutsideTargetWindow);
+
+        #[test]
+        fn missing_or_empty_direct_title_uses_semantic_static_text_label() {
+            let selected = select_name(NameAttribute::MissingOrEmpty, || {
+                static_text_name(true,
+                    || Ok(NameAttribute::Nonempty("Messages")),
+                    || panic!("A nonempty related title must not consult its value"))
+            }).unwrap();
+            assert_eq!(selected, "Messages");
         }
-        frontmost(&target)?;
-        let location = Point { x: point[0], y: point[1] };
-        unobstructed(&target, location)?;
+
+        #[test]
+        fn related_title_mismatch_is_not_replaced_by_matching_value() {
+            let selected = static_text_name(true,
+                || Ok(NameAttribute::Nonempty("Archive")),
+                || panic!("A present related title is authoritative")).unwrap();
+            assert_eq!(selected, "Archive");
+            assert_ne!(selected, "Messages");
+        }
+
+        #[test]
+        fn static_text_value_requires_missing_or_empty_related_title() {
+            let selected = static_text_name(true,
+                || Ok(NameAttribute::MissingOrEmpty),
+                || Ok(NameAttribute::Nonempty("Messages"))).unwrap();
+            assert_eq!(selected, "Messages");
+        }
+
+        #[test]
+        fn non_static_text_relation_cannot_supply_a_name() {
+            let selected: DiagnosticResult<&str> = static_text_name(false,
+                || panic!("A control or image title must not be read as a static-text label"),
+                || panic!("A control value must not be read as a static-text label"));
+            assert_eq!(selected, Err(Diagnostic::AccessibilityTitleUnavailable));
+        }
+
+        #[test]
+        fn ambiguous_attribute_types_do_not_trigger_fallback() {
+            let direct: DiagnosticResult<&str> = select_name(NameAttribute::Invalid, || {
+                panic!("An invalid direct title must not be treated as absent");
+            });
+            assert_eq!(direct, Err(Diagnostic::AccessibilityTitleUnavailable));
+            let related: DiagnosticResult<&str> = static_text_name(true,
+                || Ok(NameAttribute::Invalid),
+                || panic!("An invalid related title must not fall back to a value"));
+            assert_eq!(related, Err(Diagnostic::AccessibilityTitleUnavailable));
+        }
+
+        #[test]
+        fn absent_semantic_names_remain_unavailable() {
+            let without_relation: DiagnosticResult<&str> = select_name(NameAttribute::MissingOrEmpty,
+                || Err(Diagnostic::AccessibilityTitleUnavailable));
+            assert_eq!(without_relation, Err(Diagnostic::AccessibilityTitleUnavailable));
+            let empty_relation: DiagnosticResult<&str> = static_text_name(true,
+                || Ok(NameAttribute::MissingOrEmpty),
+                || Ok(NameAttribute::MissingOrEmpty));
+            assert_eq!(empty_relation, Err(Diagnostic::AccessibilityTitleUnavailable));
+        }
+    }
+
+    fn name_attribute(element: Element, name: &'static [u8]) -> DiagnosticResult<NameAttribute<Owned>> {
+        let name = string(name).map_err(|_| Diagnostic::AccessibilityTitleUnavailable)?;
+        let mut value = ptr::null();
+        let error = unsafe { AXUIElementCopyAttributeValue(element, name.0, &mut value) };
+        let value = (!value.is_null()).then(|| Owned(value));
+        // Only unsupported attributes and absent values mean "no name".
+        // Transport failures and values of an ambiguous type fail closed.
+        if error == -25205 || error == -25212 {
+            return Ok(NameAttribute::MissingOrEmpty);
+        }
+        if error != 0 {
+            return Err(Diagnostic::AccessibilityTitleUnavailable);
+        }
+        let value = value.ok_or(Diagnostic::AccessibilityTitleUnavailable)?;
+        if unsafe { CFGetTypeID(value.0) != CFStringGetTypeID() } {
+            return Ok(NameAttribute::Invalid);
+        }
+        if unsafe { CFStringGetLength(value.0) } == 0 {
+            return Ok(NameAttribute::MissingOrEmpty);
+        }
+        Ok(NameAttribute::Nonempty(value))
+    }
+
+    fn element_window_matches(element: Element, target: &CaptureTarget) -> Result<bool> {
+        if unsafe { CFEqual(element, target.window.0) } {
+            return Ok(true);
+        }
+        let window = attribute(element, b"AXWindow\0")?;
+        ensure!(unsafe { CFGetTypeID(window.0) == AXUIElementGetTypeID() },
+            "Invalid accessibility window attribute");
+        Ok(unsafe { CFEqual(window.0, target.window.0) })
+    }
+
+    fn accessible_name(element: Element, target: &CaptureTarget) -> DiagnosticResult<Owned> {
+        select_name(name_attribute(element, b"AXTitle\0")?, || {
+            // AXTitleUIElement is a semantic label relation, not an invitation
+            // to search child badges, image descriptions, or descendants.
+            let title = attribute(element, b"AXTitleUIElement\0")
+                .map_err(|_| Diagnostic::AccessibilityTitleUnavailable)?;
+            if unsafe { CFGetTypeID(title.0) != AXUIElementGetTypeID() } {
+                return Err(Diagnostic::AccessibilityTitleUnavailable);
+            }
+            let mut pid = 0;
+            if unsafe { AXUIElementGetPid(title.0, &mut pid) } != 0 || pid != target.pid
+                || !element_window_matches(title.0, target)
+                    .map_err(|_| Diagnostic::AccessibilityTitleUnavailable)? {
+                return Err(Diagnostic::AccessibilityTitleUnavailable);
+            }
+            let is_static_text = matches_string_attribute(title.0, b"AXRole\0", "AXStaticText")
+                .map_err(|_| Diagnostic::AccessibilityTitleUnavailable)?;
+            static_text_name(is_static_text,
+                || name_attribute(title.0, b"AXTitle\0"),
+                || name_attribute(title.0, b"AXValue\0"))
+        })
+    }
+
+    fn hit_target_element(target: &CaptureTarget, point: [f64; 2]) -> DiagnosticResult<Owned> {
         let system = owned(unsafe { AXUIElementCreateSystemWide() }, "system accessibility element")
             .map_err(|_| Diagnostic::HitTestUnavailable)?;
         let mut hit = ptr::null();
@@ -704,24 +908,48 @@ mod macos_desktop {
             return Err(Diagnostic::HitTestUnavailable);
         }
         if pid != target.pid {
+            return Err(Diagnostic::PointObscured);
+        }
+        if !element_window_matches(element.0, target).map_err(|_| Diagnostic::HitTestUnavailable)? {
             return Err(Diagnostic::TargetElementMismatch);
         }
-        if !unsafe { CFEqual(element.0, target.window.0) } {
-            let window = attribute(element.0, b"AXWindow\0").map_err(|_| Diagnostic::HitTestUnavailable)?;
-            if !unsafe { CFEqual(window.0, target.window.0) } {
-                return Err(Diagnostic::TargetElementMismatch);
-            }
+        Ok(element)
+    }
+
+    fn element_at_point(point: [f64; 2], role: &str, label: Option<&str>) -> DiagnosticResult<Owned> {
+        if !trusted() {
+            return Err(Diagnostic::AccessibilityUnavailable);
         }
+        if !point.iter().all(|value| value.is_finite())
+            || role.is_empty() || role.len() > 256
+            || label.is_some_and(|label| label.is_empty() || label.len() > 256) {
+            return Err(Diagnostic::PreflightUnavailable);
+        }
+        // AX hit testing accepts floats; refuse rounding that could hit a
+        // different element from the exact point sent to Core Graphics.
+        if !point.iter().all(|value| (*value as f32) as f64 == *value) {
+            return Err(Diagnostic::CoordinatePrecisionUnsupported);
+        }
+        let target = window_target(false).map_err(|_| Diagnostic::TargetWindowUnavailable)?;
+        let [x, y, width, height] = bounds(target.position, target.size);
+        if !(point[0] >= x && point[0] < x + width && point[1] >= y && point[1] < y + height) {
+            return Err(Diagnostic::PointOutsideTargetWindow);
+        }
+        frontmost(&target)?;
+        confirm_target_opaque(&target)?;
+        let element = hit_target_element(&target, point)?;
         if !matches_string_attribute(element.0, b"AXRole\0", role)
             .map_err(|_| Diagnostic::AccessibilityRoleUnavailable)? {
             return Err(Diagnostic::AccessibilityRoleMismatch);
         }
-        if !matches_string_attribute(element.0, b"AXTitle\0", label)
-            .map_err(|_| Diagnostic::AccessibilityTitleUnavailable)? {
-            return Err(Diagnostic::AccessibilityTitleMismatch);
+        if let Some(label) = label {
+            let name = accessible_name(element.0, &target)?;
+            if !matches_string_value(name.0, label).map_err(|_| Diagnostic::AccessibilityTitleUnavailable)? {
+                return Err(Diagnostic::AccessibilityTitleMismatch);
+            }
         }
         // Recheck live window identity and geometry after AX reads, then
-        // recheck frontmost and occlusion.
+        // recheck frontmost, target opacity, and system-wide hit identity.
         let current = window_target(false).map_err(|_| Diagnostic::TargetWindowUnavailable)?;
         if !(current.pid == target.pid && current.number == target.number
             && unsafe { CFEqual(current.window.0, target.window.0) }
@@ -732,11 +960,15 @@ mod macos_desktop {
             return Err(Diagnostic::TargetChanged);
         }
         frontmost(&current)?;
-        unobstructed(&current, location)?;
+        confirm_target_opaque(&current)?;
+        let repeated = hit_target_element(&current, point)?;
+        if !unsafe { CFEqual(element.0, repeated.0) } {
+            return Err(Diagnostic::TargetElementMismatch);
+        }
         Ok(element)
     }
 
-    pub(super) fn preflight_element(point: [f64; 2], role: &str, label: &str) -> DiagnosticResult<()> {
+    pub(super) fn preflight_element(point: [f64; 2], role: &str, label: Option<&str>) -> DiagnosticResult<()> {
         element_at_point(point, role, label).map(|_| ())
     }
 
@@ -748,7 +980,307 @@ mod macos_desktop {
         Some(unsafe { CFBooleanGetValue(value.0) })
     }
 
-    pub(super) fn activate_element(point: [f64; 2], role: &str, label: &str) -> Result<()> {
+    pub(super) fn search_target_available() -> DiagnosticResult<()> {
+        if !trusted() {
+            return Err(Diagnostic::AccessibilityUnavailable);
+        }
+        let target = window_target(false).map_err(|_| Diagnostic::TargetWindowUnavailable)?;
+        frontmost(&target)?;
+        confirm_target_opaque(&target)
+    }
+
+    fn attribute_writable(element: Element, name: &'static [u8]) -> DiagnosticResult<()> {
+        let name = string(name).map_err(|_| Diagnostic::PreflightUnavailable)?;
+        let mut settable = 0;
+        if unsafe { AXUIElementIsAttributeSettable(element, name.0, &mut settable) } != 0 || settable == 0 {
+            return Err(Diagnostic::PreflightUnavailable);
+        }
+        Ok(())
+    }
+
+    fn search_parent(element: Element, target: &CaptureTarget, role: &str) -> DiagnosticResult<Owned> {
+        let parent = attribute(element, b"AXParent\0").map_err(|_| Diagnostic::TargetElementMismatch)?;
+        if unsafe { CFGetTypeID(parent.0) != AXUIElementGetTypeID() } {
+            return Err(Diagnostic::TargetElementMismatch);
+        }
+        let mut pid = 0;
+        if unsafe { AXUIElementGetPid(parent.0, &mut pid) } != 0 || pid != target.pid
+            || !element_window_matches(parent.0, target).map_err(|_| Diagnostic::TargetElementMismatch)?
+            || !matches_string_attribute(parent.0, b"AXRole\0", role)
+                .map_err(|_| Diagnostic::AccessibilityRoleUnavailable)? {
+            return Err(Diagnostic::TargetElementMismatch);
+        }
+        let children = search_children(parent.0)?.ok_or(Diagnostic::TargetElementMismatch)?;
+        let count = unsafe { CFArrayGetCount(children.0) };
+        if !(1..=2048).contains(&count) {
+            return Err(Diagnostic::TargetElementMismatch);
+        }
+        let mut occurrences = 0;
+        for index in 0..count {
+            let child = unsafe { CFArrayGetValueAtIndex(children.0, index) };
+            if child.is_null() || unsafe { CFGetTypeID(child) != AXUIElementGetTypeID() } {
+                return Err(Diagnostic::PreflightUnavailable);
+            }
+            if unsafe { CFEqual(child, element) } {
+                occurrences += 1;
+            }
+        }
+        if occurrences != 1 {
+            return Err(Diagnostic::TargetElementMismatch);
+        }
+        Ok(parent)
+    }
+
+    // Only documented AX absence means a leaf. Wrong types and transport errors
+    // cannot silently hide a second header text field.
+    fn search_children(element: Element) -> DiagnosticResult<Option<Owned>> {
+        let name = string(b"AXChildren\0").map_err(|_| Diagnostic::PreflightUnavailable)?;
+        let mut value = ptr::null();
+        let error = unsafe { AXUIElementCopyAttributeValue(element, name.0, &mut value) };
+        let value = (!value.is_null()).then(|| Owned(value));
+        if error == -25205 || error == -25212 {
+            return Ok(None);
+        }
+        let value = value.ok_or(Diagnostic::PreflightUnavailable)?;
+        if error != 0 || unsafe { CFGetTypeID(value.0) != CFArrayGetTypeID() } {
+            return Err(Diagnostic::PreflightUnavailable);
+        }
+        Ok(Some(value))
+    }
+
+    fn search_field_structure(target: &CaptureTarget, field: Element, point: [f64; 2]) -> DiagnosticResult<()> {
+        if !matches_string_attribute(field, b"AXRole\0", "AXTextField")
+            .map_err(|_| Diagnostic::AccessibilityRoleUnavailable)? {
+            return Err(Diagnostic::AccessibilityRoleMismatch);
+        }
+        let (position, size) = geometry(field).map_err(|_| Diagnostic::PreflightUnavailable)?;
+        let right = position.x + size.width;
+        let bottom = position.y + size.height;
+        let window_right = target.position.x + target.size.width;
+        let header_bottom = target.position.y + target.size.height.min(80.0);
+        if !right.is_finite() || !bottom.is_finite() || size.height > 60.0
+            || position.x < target.position.x || right > window_right
+            || position.y < target.position.y || bottom > header_bottom
+            || point[0] < position.x || point[0] >= right
+            || point[1] < position.y || point[1] >= bottom {
+            return Err(Diagnostic::TargetElementMismatch);
+        }
+        if boolean_attribute(field, b"AXEnabled\0") != Some(true)
+            || boolean_attribute(field, b"AXFocused\0").is_none() {
+            return Err(Diagnostic::PreflightUnavailable);
+        }
+        attribute_writable(field, b"AXFocused\0")?;
+        attribute_writable(field, b"AXValue\0")?;
+        let value = attribute(field, b"AXValue\0").map_err(|_| Diagnostic::PreflightUnavailable)?;
+        if unsafe { CFGetTypeID(value.0) != CFStringGetTypeID() } {
+            return Err(Diagnostic::PreflightUnavailable);
+        }
+        let parent = search_parent(field, target, "AXSplitGroup")?;
+        let split = search_parent(parent.0, target, "AXSplitGroup")?;
+        let window = search_parent(split.0, target, "AXWindow")?;
+        if !unsafe { CFEqual(window.0, target.window.0) }
+            || unsafe { CFEqual(parent.0, split.0) } {
+            return Err(Diagnostic::TargetElementMismatch);
+        }
+        let children = search_children(parent.0)?.ok_or(Diagnostic::TargetElementMismatch)?;
+        let count = unsafe { CFArrayGetCount(children.0) };
+        if !(1..=2048).contains(&count) {
+            return Err(Diagnostic::TargetElementMismatch);
+        }
+        // Current WeCom exposes the chat composer as a sibling AXTextField in the
+        // header band. Ambiguity is resolved only by an observed vertical AXSplitter
+        // that separates this field's left column from every other header text
+        // field; anything else fails closed rather than guessing by position.
+        let mut dividers = Vec::new();
+        let mut header_fields = Vec::new();
+        let mut target_occurrences = 0;
+        for index in 0..count {
+            let child = unsafe { CFArrayGetValueAtIndex(children.0, index) };
+            if child.is_null() || unsafe { CFGetTypeID(child) != AXUIElementGetTypeID() } {
+                return Err(Diagnostic::PreflightUnavailable);
+            }
+            let role = if matches_string_attribute(child, b"AXRole\0", "AXSplitter")
+                .map_err(|_| Diagnostic::AccessibilityRoleUnavailable)? {
+                "AXSplitter"
+            } else if matches_string_attribute(child, b"AXRole\0", "AXTextField")
+                .map_err(|_| Diagnostic::AccessibilityRoleUnavailable)? {
+                "AXTextField"
+            } else {
+                continue;
+            };
+            let (child_position, child_size) = geometry(child).map_err(|_| Diagnostic::PreflightUnavailable)?;
+            if !child_size.width.is_finite() || !child_size.height.is_finite() {
+                return Err(Diagnostic::PreflightUnavailable);
+            }
+            if role == "AXSplitter" {
+                if child_size.width > 0.0 && child_size.height > child_size.width {
+                    dividers.push((child_position.x, child_position.y, child_position.y + child_size.height));
+                }
+                continue;
+            }
+            if child_size.width <= 0.0 || child_size.height <= 0.0 {
+                return Err(Diagnostic::TargetElementMismatch);
+            }
+            if unsafe { CFEqual(child, field) } {
+                target_occurrences += 1;
+            }
+            if child_position.y < header_bottom && child_position.y + child_size.height > target.position.y {
+                header_fields.push((
+                    unsafe { CFEqual(child, field) },
+                    child_position.x,
+                    child_position.x + child_size.width,
+                    child_position.y,
+                    child_position.y + child_size.height,
+                ));
+            }
+        }
+        if target_occurrences != 1 {
+            return Err(Diagnostic::TargetElementMismatch);
+        }
+        if !header_fields.iter().any(|(is_target, _, _, _, _)| *is_target) {
+            return Err(Diagnostic::TargetElementMismatch);
+        }
+        if header_fields.len() > 1 {
+            let Some((divider_x, _, _)) = dividers.iter().copied().find(|(x, top, bottom)| {
+                *x > right && *top < header_bottom && *bottom > target.position.y
+            }) else {
+                return Err(Diagnostic::TargetElementMismatch);
+            };
+            if header_fields.iter().any(|(is_target, left_edge, _, _, _)| {
+                !*is_target && *left_edge <= divider_x
+            }) {
+                return Err(Diagnostic::TargetElementMismatch);
+            }
+        }
+        Ok(())
+    }
+
+    fn same_search_window(a: &CaptureTarget, b: &CaptureTarget) -> bool {
+        a.pid == b.pid && a.number == b.number && unsafe { CFEqual(a.window.0, b.window.0) }
+            && bounds(a.position, a.size) == bounds(b.position, b.size)
+            && a.display == b.display
+            && bounds(a.display_bounds.origin, a.display_bounds.size) == bounds(b.display_bounds.origin, b.display_bounds.size)
+    }
+
+    fn search_field_at_point(point: [f64; 2]) -> DiagnosticResult<(CaptureTarget, Owned)> {
+        if !trusted() {
+            return Err(Diagnostic::AccessibilityUnavailable);
+        }
+        if !point.iter().all(|value| value.is_finite()) {
+            return Err(Diagnostic::PreflightUnavailable);
+        }
+        if !point.iter().all(|value| (*value as f32) as f64 == *value) {
+            return Err(Diagnostic::CoordinatePrecisionUnsupported);
+        }
+        let target = window_target(false).map_err(|_| Diagnostic::TargetWindowUnavailable)?;
+        if point[0] < target.position.x || point[0] >= target.position.x + target.size.width
+            || point[1] < target.position.y || point[1] >= target.position.y + target.size.height {
+            return Err(Diagnostic::PointOutsideTargetWindow);
+        }
+        frontmost(&target)?;
+        confirm_target_opaque(&target)?;
+        let field = hit_target_element(&target, point)?;
+        let before = geometry(field.0).map_err(|_| Diagnostic::PreflightUnavailable)?;
+        search_field_structure(&target, field.0, point)?;
+        let current = window_target(false).map_err(|_| Diagnostic::TargetWindowUnavailable)?;
+        if !same_search_window(&target, &current) {
+            return Err(Diagnostic::TargetChanged);
+        }
+        frontmost(&current)?;
+        confirm_target_opaque(&current)?;
+        let repeated = hit_target_element(&current, point)?;
+        let after = geometry(repeated.0).map_err(|_| Diagnostic::PreflightUnavailable)?;
+        if !unsafe { CFEqual(field.0, repeated.0) }
+            || bounds(before.0, before.1) != bounds(after.0, after.1) {
+            return Err(Diagnostic::TargetElementMismatch);
+        }
+        Ok((current, field))
+    }
+
+    pub(super) fn preflight_search_query(point: [f64; 2]) -> DiagnosticResult<()> {
+        search_field_at_point(point).map(|_| ())
+    }
+
+    fn search_focus_matches(app: Element, field: Element) -> Result<bool> {
+        let focused = attribute(app, b"AXFocusedUIElement\0")?;
+        Ok(unsafe { CFGetTypeID(focused.0) == AXUIElementGetTypeID() && CFEqual(focused.0, field) }
+            && boolean_attribute(field, b"AXFocused\0") == Some(true))
+    }
+
+    fn search_value_matches(field: Element, query: &str) -> Result<bool> {
+        let actual = attribute(field, b"AXValue\0")?;
+        ensure!(unsafe { CFGetTypeID(actual.0) == CFStringGetTypeID() }, "Invalid search field value type");
+        let length = unsafe { CFStringGetLength(actual.0) };
+        if !(0..=256).contains(&length) {
+            return Ok(false);
+        }
+        let mut bytes = [0_u8; 256];
+        let mut used = 0;
+        let converted = unsafe {
+            CFStringGetBytes(actual.0, CFRange { location: 0, length }, 0x0800_0100, 0, false,
+                bytes.as_mut_ptr(), bytes.len() as isize, &mut used)
+        };
+        Ok(converted == length && used >= 0 && used as usize <= bytes.len()
+            && &bytes[..used as usize] == query.as_bytes())
+    }
+
+    fn revalidate_search_field(target: &CaptureTarget, field: Element, point: [f64; 2]) -> Result<()> {
+        let (current, hit) = search_field_at_point(point)
+            .map_err(|_| anyhow::anyhow!("WeCom search target validation failed"))?;
+        ensure!(same_search_window(target, &current) && unsafe { CFEqual(field, hit.0) },
+            "WeCom search target changed");
+        Ok(())
+    }
+
+    pub(super) fn set_search_query(point: [f64; 2], query: &str) -> Result<()> {
+        let (target, field) = search_field_at_point(point)
+            .map_err(|_| anyhow::anyhow!("WeCom search target validation failed"))?;
+        let original_geometry = geometry(field.0)?;
+        let app = owned(unsafe { AXUIElementCreateApplication(target.pid) }, "WeCom application")?;
+        let focus_name = string(b"AXFocused\0")?;
+        let value_name = string(b"AXValue\0")?;
+        let value = owned(unsafe {
+            CFStringCreateWithBytes(ptr::null(), query.as_ptr(), query.len() as isize, 0x0800_0100, false)
+        }, "search query string")?;
+        revalidate_search_field(&target, field.0, point)?;
+        // From this call onward every error is an unknown outcome. Neither
+        // focus nor value writes are retried, even if AX reports an error.
+        let error = unsafe { AXUIElementSetAttributeValue(field.0, focus_name.0, kCFBooleanTrue) };
+        ensure!(error == 0, "WeCom search focus request failed");
+        ensure!(search_focus_matches(app.0, field.0)?, "WeCom search focus could not be verified");
+        revalidate_search_field(&target, field.0, point)?;
+        let current_geometry = geometry(field.0)?;
+        ensure!(bounds(original_geometry.0, original_geometry.1) == bounds(current_geometry.0, current_geometry.1),
+            "WeCom search field geometry changed");
+        frontmost(&target).map_err(|_| anyhow::anyhow!("WeCom search window is no longer active"))?;
+        ensure!(search_focus_matches(app.0, field.0)?, "WeCom search focus changed before writing");
+        let error = unsafe { AXUIElementSetAttributeValue(field.0, value_name.0, value.0) };
+        ensure!(error == 0, "WeCom search value replacement failed");
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            // Read-only observation, not another input attempt.
+            let current = window_target(false).context("WeCom search window unavailable after writing")?;
+            ensure!(same_search_window(&target, &current), "WeCom search window changed after writing");
+            frontmost(&current).map_err(|_| anyhow::anyhow!("WeCom search window is no longer active"))?;
+            confirm_target_opaque(&current).map_err(|_| anyhow::anyhow!("WeCom search window is no longer opaque"))?;
+            let hit = hit_target_element(&current, point)
+                .map_err(|_| anyhow::anyhow!("WeCom search hit changed after writing"))?;
+            ensure!(unsafe { CFEqual(field.0, hit.0) }, "WeCom search target changed after writing");
+            let field_geometry = geometry(field.0)?;
+            ensure!(bounds(original_geometry.0, original_geometry.1) == bounds(field_geometry.0, field_geometry.1),
+                "WeCom search field geometry changed after writing");
+            ensure!(search_focus_matches(app.0, field.0)?, "WeCom search focus changed after writing");
+            let matches = search_value_matches(field.0, query)?;
+            frontmost(&target).map_err(|_| anyhow::anyhow!("WeCom search window is no longer active"))?;
+            ensure!(Instant::now() < deadline, "WeCom search readback timed out");
+            if matches {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
+
+    pub(super) fn activate_element(point: [f64; 2], role: &str, label: Option<&str>) -> Result<()> {
         let initial = element_at_point(point, role, label).map_err(|_| anyhow::anyhow!("Activation validation failed"))?;
         let location = Point { x: point[0], y: point[1] };
         // Allocate both events before dispatch so allocation failure cannot leave
@@ -773,10 +1305,26 @@ mod macos_desktop {
             CGEventPost(0, up.0);
         }
         let verified = (|| -> Result<bool> {
-            let current = element_at_point(point, role, label).map_err(|_| anyhow::anyhow!("Activation validation failed"))?;
-            ensure!(unsafe { CFEqual(current.0, element.0) }, "Target changed after dispatch");
-            Ok((focused == Some(false) && boolean_attribute(current.0, b"AXFocused\0") == Some(true))
-                || (selected == Some(false) && boolean_attribute(current.0, b"AXSelected\0") == Some(true)))
+            // CGEventPost is asynchronous. Observe only; never dispatch another
+            // click while waiting for the same target's state transition.
+            let deadline = Instant::now() + Duration::from_millis(500);
+            loop {
+                if Instant::now() >= deadline {
+                    return Ok(false);
+                }
+                let current = element_at_point(point, role, label).map_err(|_| anyhow::anyhow!("Activation validation failed"))?;
+                ensure!(unsafe { CFEqual(current.0, element.0) }, "Target changed after dispatch");
+                let transitioned = (focused == Some(false) && boolean_attribute(current.0, b"AXFocused\0") == Some(true))
+                    || (selected == Some(false) && boolean_attribute(current.0, b"AXSelected\0") == Some(true));
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(false);
+                }
+                if transitioned {
+                    return Ok(true);
+                }
+                std::thread::sleep(Duration::from_millis(20).min(remaining));
+            }
         })();
         ensure!(matches!(verified, Ok(true)),
             "Activation was dispatched but its outcome is unknown");
@@ -904,12 +1452,10 @@ mod macos_desktop {
         ensure!(screen_recording_allowed(), "macOS Screen Recording permission is required");
         let target = capture_target()?;
         let captured_at_ms = now_ms()?;
-        let image = owned(unsafe { CGWindowListCreateImage(CGRectNull, 8, target.number, 1) }, "WeCom window image")?;
-        let width = unsafe { CGImageGetWidth(image.0) };
-        let height = unsafe { CGImageGetHeight(image.0) };
-        let image_width = u32::try_from(width).context("WeCom capture width is too large")?;
-        let image_height = u32::try_from(height).context("WeCom capture height is too large")?;
-        ensure!(image_width > 0 && image_height > 0, "WeCom window capture is empty");
+        let directory = capture_directory()?;
+        let capture_id = uuid::Uuid::new_v4().to_string();
+        let temp_path = directory.join(format!("app-window-{capture_id}.png.tmp"));
+        let (image_width, image_height, png) = capture_window_png(target.number, &temp_path)?;
         // A shadow-free window image must have the window's aspect ratio,
         // allowing one pixel of quantization at each dimension.
         let width_from_height = f64::from(image_height) * target.size.width / target.size.height;
@@ -928,16 +1474,6 @@ mod macos_desktop {
             && current.display_bounds.size.width == target.display_bounds.size.width
             && current.display_bounds.size.height == target.display_bounds.size.height,
             "WeCom capture target changed during capture");
-        let data = owned(unsafe { CFDataCreateMutable(ptr::null(), 0) }, "PNG data")?;
-        let png = string(b"public.png\0")?;
-        let destination = owned(unsafe { CGImageDestinationCreateWithData(data.0, png.0, 1, ptr::null()) }, "PNG encoder")?;
-        unsafe { CGImageDestinationAddImage(destination.0, image.0, ptr::null()); }
-        ensure!(unsafe { CGImageDestinationFinalize(destination.0) }, "Could not encode window capture");
-        let length = unsafe { CFDataGetLength(data.0) };
-        let bytes = unsafe { CFDataGetBytePtr(data.0) };
-        ensure!(length > 0 && !bytes.is_null(), "PNG capture is empty");
-        let directory = capture_directory()?;
-        let capture_id = uuid::Uuid::new_v4().to_string();
         let path = directory.join(format!("app-window-{capture_id}.png"));
         let record_path = directory.join(format!("app-window-{capture_id}.json"));
         let record = CaptureRecord {
@@ -957,7 +1493,7 @@ mod macos_desktop {
         let mut record_created = false;
         let result = (|| -> Result<()> {
             validate_private_file(&file)?;
-            file.write_all(unsafe { std::slice::from_raw_parts(bytes, length as usize) })
+            file.write_all(&png)
                 .context("Could not write private capture file")?;
             let mut metadata = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
                 .open(&record_path).context("Could not create private capture record")?;
@@ -988,6 +1524,24 @@ mod macos_desktop {
             image_height,
             window_bounds_points: record.window_bounds,
         })
+    }
+
+    fn capture_window_png(window: u32, path: &Path) -> Result<(u32, u32, Vec<u8>)> {
+        let status = std::process::Command::new("/usr/sbin/screencapture")
+            .args(["-x", "-o", &format!("-l{window}")])
+            .arg(path)
+            .status()
+            .context("Could not start window capture")?;
+        let read = std::fs::read(path).context("Could not read window capture");
+        let _ = std::fs::remove_file(path);
+        let bytes = read?;
+        ensure!(status.success(), "Window capture failed");
+        ensure!(bytes.len() >= 24 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" && &bytes[8..16] == b"\0\0\0\rIHDR",
+            "Window capture is not a PNG");
+        let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+        ensure!(width > 0 && height > 0, "Window capture is empty");
+        Ok((width, height, bytes))
     }
 
     pub(super) fn center() -> Result<()> {

@@ -43,7 +43,7 @@ paths:
       operationId: listCapabilities
       responses:
         '200':
-          description: Read-only instruction capability catalog. WeCom launch, window centering, app window capture, local window object localization and element activation depend on the implemented channel and runtime prerequisites; search, chat, send, and message verification are unavailable.
+          description: Read-only instruction capability catalog. WeCom launch, window centering, app window capture, local window object localization, element activation and controlled header search-query replacement depend on their implemented channel and runtime prerequisites; contact matching, chat, send, and message verification are unavailable. Search-query availability is independent of screenshot/click grants; native prerequisites remain advisory until authorized preflight.
           content:
             application/json:
               schema: { $ref: './schemas/capability-catalog.json' }
@@ -54,12 +54,21 @@ paths:
       security: [{ localToken: [] }]
       description: >-
         Synchronous terminal execution only. The required string `protocol_version` must be `"1"`.
-        Supply `app: wecom` and either non-empty natural-language `messages` (each non-blank)
+        Supply a required sole target `app` ID matching `^[a-z][a-z0-9_.-]{0,127}$`
+        (1..128 ASCII characters) and either non-empty natural-language `messages` (each non-blank)
         or non-empty exact `instructions`. When instructions are present they are authoritative
         and messages are ignored; empty instructions are rejected. WeCom window centering uses
         the macOS GUI channel and requires an existing window and Accessibility permission; it
         does not launch or switch applications. `capture_app_window` and natural language
         `截取企业微信窗口` capture only the selected WeCom window. Exactly one WeCom process
+        The request app is never duplicated in instruction params; both internal TaskInput modes
+        require app without a default, and response app preserves the requested target.
+        Invalid app syntax returns invalid_request. Syntactically valid unsupported targets return
+        capability_unavailable before resolution, authorization or native dispatch, never a WeCom fallback.
+        The catalog currently supports only wecom; WeCom natural-language phrases resolve only for wecom.
+        Generic actions launch_app, center_app_window, detection_app_window_objects, click_app_element,
+        inspect_app_element and input_app_element; protocol_version remains "1".
+        Concrete WeCom adapter methods, capability IDs, scopes and grant hashes remain unchanged.
         must be running; the sole Accessibility window or, when there are multiple, its main
         window is selected and must map uniquely to a visible Core Graphics window by PID and
         geometry. Ambiguity fails; no screen rectangle or occluding windows are captured.
@@ -71,7 +80,7 @@ paths:
         restart may be required. Capability discovery never requests permission.
         The sensitive PNG path is in a private `0700` directory under `~/.desk-agent`;
         the unique file has mode `0600` and its contents are not logged.
-        Exact instruction `locate_app_window_objects` takes `params.objects`, an ordered array
+        Exact instruction `detection_app_window_objects` takes `params.objects`, an ordered array
         of 1–16 nonblank strings of at most 256 UTF-8 bytes each; natural-language planning
         is unavailable. It captures a fresh window image and sends it, resized and JPEG encoded,
         to the fixed local endpoint `http://127.0.0.1/v1/chat/completions`, model
@@ -102,42 +111,110 @@ paths:
         Global top-left logical points may be negative. These are snapshots, not current UI or
         action authorization: matching geometry cannot rule out movement and return, or later
         changes. Predictions are untrusted; independently revalidate before acting.
-        Standalone exact `activate_app_element` takes finite `point` [x,y] in global
-        macOS top-left logical points, and nonempty `expected_role` and `expected_label`
-        (each at most 256 UTF-8 bytes). The caller supplies the exact AXRole and AXTitle,
-        not a model's untrusted prediction. The point must be within the live selected
-        WeCom window. macOS Accessibility permission is required; activation does not
-        capture a screenshot or require Screen Recording permission. Immediately before
-        input the live AX hit is checked against the exact role and title and selected
-        WeCom window, which must be frontmost and unobstructed; no app is launched or activated.
-        This is not arbitrary screen input or natural-language planning.
-        Missing AXRole or AXTitle fails closed; AXDescription is not a substitute.
+        Standalone exact `click_app_element` takes finite `point` [x,y] in global
+        macOS top-left logical points and nonblank `expected_role` (at most 256 UTF-8 bytes).
+        Optional `expected_label` defaults to null: omission/null explicitly selects
+        coordinate-plus-role identity; a nonblank string (at most 256 UTF-8 bytes) selects
+        semantic-name validation. Empty or whitespace-only strings are invalid, not a mode switch.
+        The caller supplies the exact AXRole, not a model's untrusted prediction; roles are
+        not inferred or converted (AXCell is not AXButton).
+        Both modes require a point within the live unique frontmost WeCom window.
+        macOS Accessibility permission is required; activation does not capture a screenshot,
+        require a capture record, or require Screen Recording permission.
+        System-wide AX hit ownership must match the exact target PID/window and role;
+        semantic-name mode additionally checks the accessible name. Identical element identity
+        and unchanged window geometry are checked again immediately before native CGEvent
+        mouse down/up. The live Core Graphics target must remain visible, opaque and contain
+        the point. Another window's enclosing rectangle alone does not establish obstruction;
+        no process-name exemption is used. Hits in another process or window fail with
+        `point_obscured` or `target_element_mismatch`. Nonaccessible overlays may evade the AX
+        hit check: this is not a guarantee against all visible overlays. No app is launched or
+        activated, no point outside the target app is clicked, no text is sent, and pre-dispatch
+        validation is not bypassed. This is not arbitrary screen input or natural-language planning.
+        In name mode, `expected_label` uses the element's nonempty direct AXTitle first.
+        Only when absent/empty may standard AXTitleUIElement supply a label: the related
+        element must share the PID/window and have AXStaticText role; use its nonempty AXTitle,
+        otherwise its nonempty string AXValue. A direct title mismatch never falls back.
+        AXDescription, arbitrary children/descendants, unread counts, icon descriptions and
+        guessed labels are not substitutes. Missing role/name fails closed in name mode;
+        failed name checks never silently select coordinate mode.
+        Coordinate mode does not read titles/names and does not assert Messages, the correct
+        message, or any semantic identity. The caller independently reviews the screenshot/current
+        UI and explicitly approves the exact point and role; model/application content cannot
+        authorize. The observed nameless Messages AXCell remains ineligible for name mode.
+        This is not evidence of a successful live Messages click or a guaranteed state transition.
         Each coordinate must be exactly representable as f32 (integer points are an example);
         values are not automatically rounded, and callers must not guess pixel-to-point scaling.
         A separate single-use explicit grant binds app `wecom`, capability and scope
         `wecom.element.activate`, route `macos_gui`, target `main_or_single_app_window`,
-        effect `activate_element`, and `activate-sha256:<digest>`. Digest is lowercase SHA-256
-        of compact UTF-8 serde_json serialization of a struct in field order `point`,
-        `expected_role`, `expected_label`, with f64 formatting (e.g. 1.0).
+        effect `activate_element`, and `activate-v3-sha256:<digest>`. Digest is lowercase
+        SHA-256 of compact UTF-8 serde_json serialization of a struct in field order `point`,
+        `expected_role`, `expected_label`, with f64 formatting (e.g. 1.0). `expected_label`
+        is always present, null when omitted/null, e.g.
+        `{"point":[100.0,200.0],"expected_role":"AXCell","expected_label":null}`.
+        All old grants, including `activate-v2-sha256:` and `activate-sha256:`, are rejected.
+        Existing semantic-label requests still work with fresh explicit v3 authorization.
         The grant is atomically consumed and audited after preflight, immediately before
-        dispatch; capture or coordinate grants cannot be reused. App and model content cannot
-        authorize. The adapter requires a newly observed focus or selection transition after
-        the click; missing or unchanged evidence, dispatch failure, or subsequent audit failure
-        means unknown outcome. Never automatically retry a dispatched action. Success returns
-        `{"activated":true}`; the separate verification status remains `not_performed`.
-        After authorization, a failed activation preflight may include a fixed
+        dispatch; capture or coordinate-conversion grants cannot be reused.
+        The adapter requires an actual AXFocused or AXSelected false-to-true transition on
+        the same target after the click; missing/unchanged evidence, dispatch failure or subsequent
+        audit failure means unknown outcome. Never automatically retry a dispatched action.
+        Success returns `{"clicked":true}`; separate verification status remains `not_performed`,
+        without claiming correct message identity.
+        After authorization, a failed click preflight may include a fixed
         `diagnostic_code` in a `capability_unavailable` TaskError, with phase `validation`,
         outcome `not_dispatched`, and `retryable: false`. It never includes actual role, title,
         label, coordinates, screenshot or raw OS errors and is not a retrospective diagnosis
         or a diagnosis after dispatch. See the TaskError schema and protocol for the catalog.
-        Standalone exact `diagnose_app_element` accepts the same parameters and performs
-        read-only current preflight checks, without input dispatch or consuming an activation
+        Standalone exact `inspect_app_element` accepts the same parameters and performs
+        read-only current preflight checks, without input dispatch or consuming a click
         grant. It requires a separate explicit local grant for capability and scope
         `wecom.element.diagnose`, route `macos_gui`, target `main_or_single_app_window`,
-        effect `inspect_element`, and `diagnose-sha256:<digest>`, using the same ordered
-        parameter serialization as activation. A match returns `{"diagnostic_code":"matched"}`;
+        effect `inspect_element`, and `diagnose-v3-sha256:<digest>`, using the same ordered
+        parameter serialization with `expected_label` always present, including null.
+        All old grants, including `diagnose-v2-sha256:` and `diagnose-sha256:`, are rejected;
+        existing semantic-label requests require fresh explicit v3 authorization.
+        A match returns `{"diagnostic_code":"matched"}` and does not prove message identity;
         a failed check returns a TaskError with a fixed diagnostic code. This is a current
-        observation, not proof of a prior failure or authorization for a later action.
+        observation, not proof of a prior failure or authorization for a later click.
+        Standalone exact `input_app_element` accepts only `point: [x,y]` and `text`.
+        CLI syntax is `input_app_element=JSON_OBJECT`; no natural-language planner is used.
+        Coordinates are finite, exactly f32-representable macOS global top-left logical points,
+        not image pixels. Text is sensitive exact field text, 1..256 UTF-8 bytes,
+        nonblank, without CR, LF or Unicode control characters; no trim, rewrite or append.
+        This supports only the current WeCom GUI structural selector, not universal text fields:
+        the point must repeatedly hit the same enabled AXTextField in the same unique frontmost
+        opaque window, entirely within its top 80 logical-point header, with positive width and
+        height at most 60 points. The exact ancestor chain is AXTextField -> AXSplitGroup ->
+        AXSplitGroup -> selected AXWindow, with direct-child membership checked at each level.
+        When other header AXTextFields exist, a direct-child vertical AXSplitter must separate
+        the target's left column from every other header field, and the target must be the only
+        header text field on that side; missing divider or same-side ambiguity fails closed.
+        Relevant direct-child lists over 2048 entries are rejected; the selector does not
+        traverse the whole window tree.
+        No guessed title, identifier, description, subrole or placeholder fallback is used.
+        Accessibility permission is required; screenshots and Screen Recording permission are not.
+        A separate explicit single-use grant binds app `wecom`, capability and scope
+        `wecom.search.query.set`, route `macos_gui`, target `wecom_search_field`, effect
+        `set_search_query`, parameters `search-query-sha256:<digest>`. Digest is lowercase SHA-256
+        of compact UTF-8 serde_json serialization of a struct ordered `point`, then `text`,
+        with f64 normalization, e.g. `{"point":[492.0,203.0],"text":"张三"}`.
+        No screenshot or click grant is reused. Only this digest, never the text or field value,
+        belongs in ordinary audit/log records. Grant/audit storage and independent grant
+        availability are checked; native prerequisites advertised by the catalog are advisory.
+        Preflight runs only after authorization, then grant consumption and intent audit commit
+        atomically with a final grant recheck before dispatch. The adapter uses writable AXFocused
+        and verifies both AXFocused true and the app's exact AXFocusedUIElement before setting
+        AXValue. Focus, window and geometry are revalidated immediately before the write.
+        No mouse/keyboard events, chat-editor input, Enter or send are performed.
+        A bounded read-only 500ms check requires exact AXValue and the same active app/window.
+        Success capability output is only `{"text_input":true}`, without text echo.
+        The shared TaskResponse step instruction still preserves original point/text for the
+        authorized caller and CLI; complete responses contain sensitive input and must not enter
+        ordinary logs/audit records. Verification remains `not_performed`: AX readback is not
+        independent screenshot evidence and does not prove contact matching.
+        Any dispatched failure, including after possible focus/write or result-audit failure,
+        means unknown outcome; stop and never retry. `search_contact` remains unavailable.
         Other cataloged instructions may be unavailable. Completion does not imply independent verification. Observation, cancellation, approval,
         and recovery have no defined wire contract and are not exposed here.
       requestBody:
@@ -150,32 +227,47 @@ paths:
                 value:
                   protocol_version: "1"
                   app: wecom
-                  instructions: [{ action: launch_wecom }]
+                  instructions: [{ action: launch_app }]
               centerWindow:
                 value:
                   protocol_version: "1"
                   app: wecom
-                  instructions: [{ action: center_wecom_window }]
+                  instructions: [{ action: center_app_window }]
               captureAppWindow:
                 value:
                   protocol_version: "1"
                   app: wecom
                   instructions: [{ action: capture_app_window }]
-              locateAppWindowObjects:
+              detectionAppWindowObjects:
                 value:
                   protocol_version: "1"
                   app: wecom
-                  instructions: [{ action: locate_app_window_objects, params: { objects: ["search button", "chat list"] } }]
+                  instructions: [{ action: detection_app_window_objects, params: { objects: ["search button", "chat list"] } }]
               convertAppWindowCoordinates:
                 value:
                   protocol_version: "1"
                   app: wecom
                   instructions: [{ action: convert_app_window_coordinates, params: { capture_id: "123e4567-e89b-12d3-a456-426614174000", boxes: [[10.0, 20.0, 30.0, 40.0]] } }]
-              activateAppElement:
+              clickAppElement:
                 value:
                   protocol_version: "1"
                   app: wecom
-                  instructions: [{ action: activate_app_element, params: { point: [100.0, 200.0], expected_role: "AXButton", expected_label: "Search" } }]
+                  instructions: [{ action: click_app_element, params: { point: [100.0, 200.0], expected_role: "AXButton", expected_label: "Search" } }]
+              clickAppElementCoordinateOnly:
+                value:
+                  protocol_version: "1"
+                  app: wecom
+                  instructions: [{ action: click_app_element, params: { point: [100.0, 200.0], expected_role: "AXCell" } }]
+              inspectAppElementCoordinateOnly:
+                value:
+                  protocol_version: "1"
+                  app: wecom
+                  instructions: [{ action: inspect_app_element, params: { point: [100.0, 200.0], expected_role: "AXCell", expected_label: null } }]
+              inputAppElement:
+                value:
+                  protocol_version: "1"
+                  app: wecom
+                  instructions: [{ action: input_app_element, params: { point: [492.0, 203.0], text: "张三" } }]
               natural:
                 value:
                   protocol_version: "1"

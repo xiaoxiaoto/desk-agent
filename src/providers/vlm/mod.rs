@@ -58,9 +58,9 @@ struct LocatedPrediction {
     coords: [f64; 4],
 }
 
-/// Locate objects in a freshly captured app window PNG. Coordinates are image pixels, not desktop coordinates.
+/// Detect objects in a freshly captured app window PNG. Coordinates are image pixels, not desktop coordinates.
 /// The caller is responsible for authorizing capture and disclosure and supplying the capture path.
-pub fn locate_app_window_objects(path: &Path, objects: &[String]) -> Result<Value> {
+pub fn detect_app_window_objects(path: &Path, objects: &[String]) -> Result<Value> {
     ensure!(!objects.is_empty() && objects.len() <= 16, "invalid object count");
     ensure!(objects.iter().all(|object| !object.trim().is_empty() && object.len() <= 256), "invalid object query");
 

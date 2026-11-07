@@ -41,20 +41,24 @@
   "protocol_version": "1",
   "app": "wecom",
   "messages": ["Open WeCom"],
-  "instructions": [{"action": "launch_wecom"}]
+  "instructions": [{"action": "launch_app"}]
 }
 ```
 
 | 字段 | 规则 |
 |---|---|
 | `protocol_version` | 必填字符串 `"1"`。 |
-| `app` | 必填的稳定应用标识；不得用作模型或提供方标识。 |
+| `app` | 必填且唯一的目标应用 ID，1..128 个 ASCII 字符，匹配 `^[a-z][a-z0-9_.-]{0,127}$`；不得用作模型或提供方标识。 |
 | `messages` | 有序非空白字符串数组；缺少 `instructions` 时必填。存在指令时可为空，且不用于规划。 |
 | `instructions` | 可选非空类型化业务指令数组。存在时选择精确模式，缺失时选择自然语言模式。`null` 和空数组无效。 |
 
 至少提供一种输入形式。同时提供时，以指令为准，`messages` 不得改变执行。精确指令必须保持顺序、目标、参数和用户文本；禁止 LLM 改写、遗漏或替换。指令是包含 `action` 以及在适用时包含 `params` 的带标签对象。指令词汇表和参数 Schema 是版本化公共契约；OS 原语和实现细节不得成为公开业务指令。能力目录将每个指令映射到稳定的命名空间能力 ID。自然语言解释必须使用确定性解析器或明确配置的规划器；意图、目标或必要数据存在歧义时必须停止并请求澄清。
 
-精确指令 `{"action":"center_wecom_window"}` 不带参数，对应能力 `wecom.window.center`。其 macOS GUI 通道将已有企业微信窗口移至窗口所在屏幕的完整屏幕中心，不改变窗口大小；不得静默启动企业微信或切换应用。该操作需要 macOS 辅助功能权限和可操作的已有窗口；平台不支持或前置条件不满足时，能力不可用或返回错误。完成本身不构成独立验证，错误不得报告为已验证。此声明不代表完整协议符合性或已在真实硬件上验证。
+`TaskRequest.app` 是唯一目标来源，指令 `params` 不得重复携带 app。内部 `TaskInput` 的 `NaturalLanguage { app, messages }` 和 `ExactInstruction { app, steps }` 均必须携带 `app: String`，反序列化不得隐式或默认使用企业微信。`TaskResponse.app` 保留请求目标，不固定为 `wecom`。app 语法无效返回 `invalid_request`；语法有效但不支持的应用可通过精确输入校验，但 Runtime 在能力解析、授权或原生分发前返回 `capability_unavailable`，不得回退到企业微信。当前目录仍只发布 `wecom`；企业微信自然语言短语也仅在该目标下解析。
+
+通用动作名为 `launch_app`、`center_app_window`、`detection_app_window_objects`、`click_app_element`、`inspect_app_element`、`input_app_element`；`protocol_version` 仍为 `"1"`。通用任务名不改变具体企业微信适配器方法、稳定能力 ID、scope、授权目标或参数摘要。
+
+精确指令 `{"action":"center_app_window"}` 不带参数，对应能力 `wecom.window.center`。其 macOS GUI 通道将已有企业微信窗口移至窗口所在屏幕的完整屏幕中心，不改变窗口大小；不得静默启动企业微信或切换应用。该操作需要 macOS 辅助功能权限和可操作的已有窗口；平台不支持或前置条件不满足时，能力不可用或返回错误。完成本身不构成独立验证，错误不得报告为已验证。此声明不代表完整协议符合性或已在真实硬件上验证。
 
 GUI 通道要求恰有一个运行中的企业微信实例；只有一个辅助功能窗口时选择该窗口，存在多个窗口时选择辅助功能主窗口，无法确定主窗口时返回错误。按窗口与活动显示器的最大重叠面积选屏；面积相同或没有重叠显示器时返回错误。设置位置后适配器回读辅助功能位置和大小，只有两者分别与目标位置及原大小相差不超过 1 点才返回成功；回读失败或不符时返回错误，但窗口可能已经移动。该回读不是独立的截图验证。
 
@@ -62,7 +66,7 @@ GUI 通道要求恰有一个运行中的企业微信实例；只有一个辅助�
 
 已获本地明确授权的截图请求在缺少屏幕录制权限时可以调用 macOS 权限请求接口。是否显示弹窗由操作系统决定；必须由用户授予权限，且可能需要重启 Runtime。能力发现保持只读，不得请求操作系统权限或弹窗。
 
-精确指令 `{"action":"locate_app_window_objects","params":{"objects":["搜索按钮","会话列表"]}}` 接受 1–16 个有序非空白字符串，每项最多 256 个 UTF-8 字节；不支持该指令的自然语言规划。操作先截取新的目标窗口图像，再按对象顺序逐项向固定本地端点 `http://127.0.0.1/v1/chat/completions`、模型 `wevisone-vl-4b` 发送敏感图像，`wevisone_task` 为 `referring`；不会静默向远程服务披露。除截图授权外，还需另一项本地明确授权：应用 `wecom`、能力及范围 `vision.window.locate`、通道 `local_vision`、目标 `main_or_single_app_window`、效果 `local_inference`、参数 `objects-sha256:<digest>`。摘要是精确有序对象数组的 `serde_json` 紧凑 UTF-8 序列化的 SHA-256 小写十六进制值。Runtime 在每次截图和每次披露前重新检查相应授权。
+精确指令 `{"action":"detection_app_window_objects","params":{"objects":["搜索按钮","会话列表"]}}` 接受 1–16 个有序非空白字符串，每项最多 256 个 UTF-8 字节；不支持该指令的自然语言规划。操作先截取新的目标窗口图像，再按对象顺序逐项向固定本地端点 `http://127.0.0.1/v1/chat/completions`、模型 `wevisone-vl-4b` 发送敏感图像，`wevisone_task` 为 `referring`；不会静默向远程服务披露。除截图授权外，还需另一项本地明确授权：应用 `wecom`、能力及范围 `vision.window.locate`、通道 `local_vision`、目标 `main_or_single_app_window`、效果 `local_inference`、参数 `objects-sha256:<digest>`。摘要是精确有序对象数组的 `serde_json` 紧凑 UTF-8 序列化的 SHA-256 小写十六进制值。Runtime 在每次截图和每次披露前重新检查相应授权。
 
 定位输出包含 `capture_id`、`image_size: [width,height]` 和按查询顺序的 `objects: [{query, predictions: [{label, coords: [x1,y1,x2,y2]}]}]`；`coords` 保持原始截图像素，不自动添加屏幕坐标。输出还包含 `capture_path`、`captured_at_unix_ms`、`target` 和 `coordinate_space`。本地推理前图像缩放并编码为 JPEG，返回的框换算回原图像像素；小目标可能因此丢失。
 
@@ -74,11 +78,13 @@ GUI 通道要求恰有一个运行中的企业微信实例；只有一个辅助�
 
 这些坐标只是快照，不代表当前界面或行动授权。几何未变也不能排除移动后移回或检查后变化。预测和标签不可信；点击前必须独立重新验证目标和当前界面。
 
-独立精确指令 `{"action":"activate_app_element","params":{"point":[100.0,200.0],"expected_role":"AXButton","expected_label":"Search"}}` 是受限的企业微信业务操作，不是任意桌面输入，也不支持自然语言规划。CLI 使用 `--instruction 'activate_app_element={"point":[100.0,200.0],"expected_role":"AXButton","expected_label":"Search"}'`。调用方须给出 macOS 全局左上原点逻辑点表示的有限坐标 `[x,y]`，以及准确的非空 AXRole 和 AXTitle，均不超过 256 UTF-8 字节。坐标必须在实时选定的企业微信窗口内。截图可用于推导坐标，但操作不截图、不需要截图记录或屏幕录制权限。调用方须识别预期目标；模型预测和应用内容不可信，不能授权操作。
-AXRole 或 AXTitle 不可用时拒绝执行；`expected_label` 是 AXTitle，不是 AXDescription。不能保证任意按钮都支持所需的状态变化。
+独立精确指令 `{"action":"click_app_element","params":{"point":[100.0,200.0],"expected_role":"AXButton","expected_label":"Search"}}` 是受限的企业微信业务操作，不是任意桌面输入，也不支持自然语言规划。CLI 使用 `--instruction 'click_app_element={"point":[100.0,200.0],"expected_role":"AXButton","expected_label":"Search"}'`。调用方须给出 macOS 全局左上原点逻辑点表示的有限坐标 `[x,y]` 和准确的非空白 `expected_role`（不超过 256 UTF-8 字节）。角色须精确匹配实际 AXRole，不会把 `AXCell` 当成 `AXButton`。`expected_label` 可选：不超过 256 UTF-8 字节的非空白字符串选择语义名称验证；省略或 `null` 明确选择坐标加角色身份模式。空串或纯空白字符串无效，不会切换模式。
+名称模式按确定顺序匹配 `expected_label`：优先使用元素自身非空 `AXTitle`；只有自身标题缺失或为空时，才通过标准 `AXTitleUIElement` 关系读取同一 PID、同一窗口内的 `AXStaticText` 标题元素，优先其非空 `AXTitle`，否则使用其非空字符串 `AXValue`。自身非空标题与预期不符时立即失败，不改用关系标签。不得使用 `AXDescription`、任意子节点或后代、未读数、图标描述或猜测的标签。角色或名称不可用时拒绝执行；名称检查失败绝不静默退回坐标模式。
+仅坐标模式示例：`{"action":"click_app_element","params":{"point":[100.0,200.0],"expected_role":"AXCell"}}`；CLI 使用 `--instruction 'click_app_element={"point":[100.0,200.0],"expected_role":"AXCell"}'`，显式 `"expected_label":null` 等价。此模式不读取标题或名称，也不声称该点是“消息”、正确的消息或任何语义目标。调用方须独立审阅截图/当前界面并明确批准精确点位和角色；模型预测和应用内容不可信，不能授权。已观察到的无名称“消息” `AXCell` 仍不符合名称模式；坐标模式只授权已批准的点位与角色，不推断消息身份，也不证明已完成真实“消息”点击。不能保证任意元素都支持所需状态变化。点击本身不截图、不需要截图记录或屏幕录制权限。
 每个坐标必须能精确表示为 f32（例如整数点）；操作不会自动舍入坐标，也不会猜测像素到点的比例。
 
-`macos_gui` 通道要求本机 macOS 辅助功能权限。它独立命中测试实时 AX 元素，检查精确角色和标题、元素属于所选企业微信窗口，且窗口位于前台、未被遮挡，并在派发前立即重新验证；不匹配或无法确认时拒绝执行，不静默启动或激活应用。必须有单独的本地明确一次性授权，绑定应用 `wecom`、能力及范围 `wecom.element.activate`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `activate_element` 和包含精确坐标、预期角色与标题的参数 `activate-sha256:<digest>`。摘要是字段依次为 `point`、`expected_role`、`expected_label` 的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写十六进制值；坐标数字使用 serde_json f64 格式（如 `1.0`），参数不得改写。预检后、派发前立即原子消费授权并审计；截图或坐标授权不能复用。
+`macos_gui` 通道要求本机 macOS 辅助功能权限。两种模式均要求坐标位于实时唯一选定、可见、不透明且处于前台的企业微信窗口内。系统全局 AX 命中测试须精确确认目标 PID、窗口和角色；名称模式另核对可访问名称。派发原生 CGEvent 鼠标按下/抬起之前，立即重复确认同一元素与未变化的窗口几何。其他 Core Graphics 窗口的外接矩形覆盖该点本身不作为遮挡证据，也不按进程名豁免；命中其他进程或窗口仍以 `point_obscured` 或 `target_element_mismatch` 拒绝。不提供可用辅助功能命中信息的覆盖层可能无法被发现，因此这不是对所有可视遮挡的保证。无法完成所需检查时拒绝执行，不静默启动或激活应用、不点击目标应用外部、不发送文本，也不绕过派发前验证。
+必须有单独的本地明确一次性授权，绑定应用 `wecom`、能力及范围 `wecom.element.activate`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `activate_element` 和包含精确坐标、预期角色及身份模式/名称的参数 `activate-v3-sha256:<digest>`。摘要是字段依次为 `point`、`expected_role`、`expected_label` 的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写十六进制值；最后一个字段始终保留，省略或 `null` 标签均写为 `null`。例如坐标模式规范参数为 `{"point":[100.0,200.0],"expected_role":"AXCell","expected_label":null}`。坐标数字使用 serde_json f64 格式（如 `1.0`），参数不得改写。`v3` 前缀绑定明确身份模式策略；所有旧授权（包括 `activate-v2-sha256:` 和 `activate-sha256:`）均拒绝。原有语义名称请求仍可使用，但须重新明确授予 v3 授权。预检后、派发前立即原子消费授权并审计；截图或坐标转换授权不能复用。
 
 授权后，激活预检失败的 `TaskError` 可包含可选固定 `diagnostic_code`；错误仍为 `capability_unavailable`，阶段为 `validation`、结果为 `not_dispatched`、`retryable: false`，并保留请求 ID。代码只描述本次派发前失败：
 
@@ -87,21 +93,42 @@ AXRole 或 AXTitle 不可用时拒绝执行；`expected_label` 是 AXTitle，不
 - `coordinate_precision_unsupported`：坐标不能按所需精度表示。
 - `point_outside_target_window`：坐标位于目标窗口外。
 - `target_not_frontmost`：目标窗口不在最前方。
-- `point_obscured`：已确定该点被遮挡。
+- `point_obscured`：系统全局 AX 命中确认该点归属目标之外。
 - `hit_test_unavailable`：辅助功能命中测试不可用。
 - `target_element_mismatch`：命中元素不属于目标窗口。
 - `accessibility_role_unavailable`：元素辅助功能角色不可用。
 - `accessibility_role_mismatch`：辅助功能角色与预期不符。
-- `accessibility_title_unavailable`：元素辅助功能标题不可用。
-- `accessibility_title_mismatch`：辅助功能标题与预期不符。
+- `accessibility_title_unavailable`：按标题／标题元素查询策略无法取得合格的可访问名称。
+- `accessibility_title_mismatch`：选定的可访问名称与预期标签不符。
 - `target_changed`：预检期间目标发生变化。
 - `preflight_unavailable`：预检因其他原因无法确定安全结果。
 
 代码不泄露实际角色、标题、标签、坐标、截图或原始系统错误。不确定时使用适当的不可用代码，不推断遮挡；固定代码也可记录在审计决策中。诊断不能绕过授权或验证，不追溯诊断旧记录，也不用于派发后的失败。
 
-独立精确指令 `diagnose_app_element` 使用与激活相同的 `point`、`expected_role` 和 `expected_label`，只读检查当前预检状态，不派发输入，也不消费激活授权。CLI 可用 `--instruction 'diagnose_app_element={"point":[100.0,200.0],"expected_role":"AXButton","expected_label":"Search"}'`。它需要独立本地明确授权，绑定应用 `wecom`、能力及范围 `wecom.element.diagnose`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `inspect_element` 和 `diagnose-sha256:<digest>`；摘要采用与激活相同的有序参数序列化。匹配时返回 `{"diagnostic_code":"matched"}`，检查失败时返回带固定诊断代码的 TaskError。这只是当前观察，不是对过去失败的追溯诊断，也不是后续激活的授权。
+独立精确指令 `inspect_app_element` 使用与 `click_app_element` 相同的 `point`、`expected_role` 和可选 `expected_label`，按明确选定的身份模式执行相同的只读当前预检，不派发输入，也不消费点击授权。CLI 名称模式示例为 `--instruction 'inspect_app_element={"point":[100.0,200.0],"expected_role":"AXButton","expected_label":"Search"}'`，坐标模式为 `--instruction 'inspect_app_element={"point":[100.0,200.0],"expected_role":"AXCell"}'`（显式 `null` 等价）。它需要独立本地明确授权，绑定应用 `wecom`、能力及范围 `wecom.element.diagnose`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `inspect_element` 和 `diagnose-v3-sha256:<digest>`；摘要采用与点击相同的有序参数序列化，始终包含 `expected_label`（含 `null`）。匹配时返回 `{"diagnostic_code":"matched"}`，检查失败时返回带固定诊断代码的 TaskError。这只是当前观察，不证明消息身份，也不是后续点击的授权。
 
-派发后适配器检查新出现的 AX 焦点或选中状态变化；原本已聚焦或状态不变不足以证明成功。证据缺失或不变、派发失败、效果发生后审计失败均为结果未知，不能报告已验证；派发后绝不自动重试。成功返回 `{"activated":true}`；独立的协议验证状态仍为 `not_performed`，不声称协议层独立验证。
+派发后适配器须在同一目标上观察到真实 `AXFocused` 或 `AXSelected` 从 false 变为 true；原本已聚焦/选中或状态不变不足以证明成功。证据缺失或不变、派发失败、效果发生后审计失败均为结果未知，不能报告已验证；派发后绝不自动重试。成功返回 `{"clicked":true}`；独立的协议验证状态仍为 `not_performed`，不声称协议层独立验证或识别了正确消息。
+
+### 受控的企业微信搜索字段文本输入
+
+独立精确指令 `{"action":"input_app_element","params":{"point":[492.0,203.0],"text":"张三"}}` 对应 `TaskInstruction::InputAppElement { point, text }`；CLI 使用 `--instruction 'input_app_element={"point":[492.0,203.0],"text":"张三"}'`。仅支持应用 `wecom`，不由自然语言解析器或规划器生成。两字段均必填，拒绝未知字段。`point` 是两个有限且能精确表示为 f32 的 macOS 全局左上原点逻辑屏幕点，不是截图像素。敏感的 `text` 必须为 1..256 UTF-8 字节、非空白且不含 CR、LF 或 Unicode 控制字符；不得裁剪、归一化或改写原文。
+
+选择器仅适用于当前支持的企业微信 GUI，不代表通用应用或任意文本框支持。给定点必须重复命中实时唯一选定、可见、不透明、前台企业微信窗口中的同一启用 `AXTextField`。文本框正尺寸边界须完全位于该窗口顶部 80 逻辑点的页头带内，宽度大于零，高度不超过 60 点；严格祖先链为 `AXTextField → AXSplitGroup → AXSplitGroup → 选定 AXWindow`，并核对各级直接子节点归属。页头带内存在其他 `AXTextField` 时，必须由直接子级的垂直 `AXSplitter` 把目标与其余页头字段分到不同列，且目标须是该侧唯一的页头文本框；缺失分割线或同侧歧义均拒绝。相关直接子节点列表超过 2048 项时拒绝，不遍历整个窗口树。当前搜索框没有可用标题、标识符、子角色、描述或占位文字，不得伪造标签或使用替代猜测。系统全局 AX 命中测试确认应用与窗口归属，并重复确认同一元素和几何；不能只按其他窗口的外接矩形判定遮挡。需要 macOS 辅助功能权限，不依赖截图或屏幕录制权限。
+
+需要独立明确的单次授权，绑定应用 `wecom`、能力及范围 `wecom.search.query.set`、通道 `macos_gui`、目标 `wecom_search_field`、效果 `set_search_query` 和参数 `search-query-sha256:<digest>`。摘要为结构体按 **`point` 然后 `text`** 字段顺序的紧凑 UTF-8 `serde_json` 序列化的小写 SHA-256，精确保留 text；f64 数字遵循 serde_json 归一化。上述示例的规范字节为 `{"point":[492.0,203.0],"text":"张三"}`。不得散列 action 外壳、改字段顺序、增加空白或换成整数数字表示。以下仅使用非敏感示例：
+
+```sh
+digest=$(printf '%s' '{"point":[492.0,203.0],"text":"张三"}' | shasum -a 256 | cut -d ' ' -f 1)
+sqlite3 "$HOME/.desk-agent/security.sqlite3" "INSERT OR IGNORE INTO local_capability_grants VALUES ('wecom','wecom.search.query.set','macos_gui','wecom_search_field','set_search_query','search-query-sha256:$digest');"
+desk-agent-cli rpa --app wecom --instruction 'input_app_element={"point":[492.0,203.0],"text":"张三"}'
+```
+
+真实文本不得留在 shell 历史、命令跟踪或普通日志中。普通审计仅记录摘要，不记录文本、旧字段值或回读文本。截图、点击及其他授权不能复用。能力目录独立检查本授权及授权/审计存储；原生前置条件仅为建议性状态，不代表通用选择器支持。必须先授权再执行原生预检；预检失败不消费授权。Runtime 在分发前复查授权，并以同一事务消费授权、提交意图审计。
+
+适配器要求 `AXFocused` 与 `AXValue` 可写，通过辅助功能设置焦点，并确认目标 `AXFocused == true` 且应用的 `AXFocusedUIElement` 正是该元素。写入前立即再次确认焦点、应用/窗口归属及未变化的几何，然后用 `AXUIElementSetAttributeValue` 替换整个 `AXValue`。不得追加、产生鼠标/键盘事件、输入聊天编辑器、按 Enter 或发送任何内容。写入后最多 500ms 的有界只读检查要求 AXValue 精确相等且仍是同一活动应用/窗口；不重试写入。
+
+成功使用共享 HTTP/IPC `TaskResponse`；能力 `output` 仅为 `{"text_input":true}`，不回显文本。共享精确指令契约仍在步骤的原始 `instruction` 中保留 `point` 和 `text`，授权调用方及 CLI 可看到自己提交的参数；因此完整响应含敏感输入，不得写入普通日志或审计。独立验证仍为 `not_performed`，AX 回读不是独立截图验证。任何已分发失败，包括可能聚焦/写入后的失败或结果审计失败，均为 `unknown`，必须停止，不得自动重试。分发前失败可使用已有脱敏类型化诊断码，不泄露文本或字段内容。该操作仅设置搜索字段文本；`SearchContact` / `search_contact` 仍不可用，不声称已匹配联系人或打开聊天。
+
 
 执行前，Runtime 必须依次进行规范化、解析、Schema 校验、范围和风险授权、适用确认、显式路由选择、通过能力调用器分发、验证、审计并返回标准结果。路由改变时必须重新执行适用的策略和审批检查。授权与审批必须绑定应用、能力、目标、副作用、路由和相关参数摘要。Runtime 必须在分发前重新检查过期与撤销状态。
 
@@ -130,7 +157,7 @@ AXRole 或 AXTitle 不可用时拒绝执行；`expected_label` 是 AXTitle，不
     "trace_id": "01900000-0000-7000-8000-000000000004",
     "mode": "exact_instruction",
     "status": "completed",
-    "steps": [{"step_id": "01900000-0000-7000-8000-000000000005", "sequence": 0, "attempt": 1, "instruction": {"action": "launch_wecom"}, "status": "completed", "verification": {"status": "not_performed", "evidence_ref": null}, "output": {}, "error": null}]
+    "steps": [{"step_id": "01900000-0000-7000-8000-000000000005", "sequence": 0, "attempt": 1, "instruction": {"action": "launch_app"}, "status": "completed", "verification": {"status": "not_performed", "evidence_ref": null}, "output": {}, "error": null}]
   }
 }
 ```

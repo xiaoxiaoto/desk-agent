@@ -21,20 +21,20 @@ enum Command {
         app: String,
         #[arg(long, required_unless_present = "instruction")]
         message: Vec<String>,
-        /// launch_wecom; center_wecom_window; capture_app_window; locate_app_window_objects=JSON_ARRAY; convert_app_window_coordinates=JSON_OBJECT; activate_app_element=JSON_OBJECT; diagnose_app_element=JSON_OBJECT; verify_message_sent; open_chat=CONTACT; send_text=TEXT; search_contact=BOOL=NAME
+        /// launch_app; center_app_window; capture_app_window; detection_app_window_objects=JSON_ARRAY; convert_app_window_coordinates=JSON_OBJECT; click_app_element=JSON_OBJECT; inspect_app_element=JSON_OBJECT; input_app_element=JSON_OBJECT; verify_message_sent; open_chat=CONTACT; send_text=TEXT; search_contact=BOOL=NAME
         #[arg(long)]
         instruction: Vec<String>,
     },
 }
 
 fn instruction(value: &str) -> anyhow::Result<TaskInstruction> {
-    if value == "launch_wecom" { return Ok(TaskInstruction::LaunchWecom); }
-    if value == "center_wecom_window" { return Ok(TaskInstruction::CenterWecomWindow); }
+    if value == "launch_app" { return Ok(TaskInstruction::LaunchApp); }
+    if value == "center_app_window" { return Ok(TaskInstruction::CenterAppWindow); }
     if value == "capture_app_window" { return Ok(TaskInstruction::CaptureAppWindow); }
     if value == "verify_message_sent" { return Ok(TaskInstruction::VerifyMessageSent); }
-    if let Some(objects) = value.strip_prefix("locate_app_window_objects=") {
-        return Ok(TaskInstruction::LocateAppWindowObjects {
-            objects: serde_json::from_str(objects).context("locate_app_window_objects requires a JSON array of strings")?,
+    if let Some(objects) = value.strip_prefix("detection_app_window_objects=") {
+        return Ok(TaskInstruction::DetectionAppWindowObjects {
+            objects: serde_json::from_str(objects).context("detection_app_window_objects requires a JSON array of strings")?,
         });
     }
     if let Some(params) = value.strip_prefix("convert_app_window_coordinates=") {
@@ -51,28 +51,43 @@ fn instruction(value: &str) -> anyhow::Result<TaskInstruction> {
             boxes: params.boxes,
         });
     }
-    if let Some((action, params)) = value.split_once('=').filter(|(action, _)| matches!(*action, "activate_app_element" | "diagnose_app_element")) {
+    if let Some((action, params)) = value.split_once('=').filter(|(action, _)| matches!(*action, "click_app_element" | "inspect_app_element")) {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Params {
             point: [f64; 2],
             expected_role: String,
-            expected_label: String,
+            #[serde(default)]
+            expected_label: Option<String>,
         }
         let params: Params = serde_json::from_str(params)
-            .context("element instruction requires a JSON object with point, expected_role and expected_label")?;
-        return Ok(if action == "diagnose_app_element" {
-            TaskInstruction::DiagnoseAppElement {
+            .context("element instruction requires a JSON object with point, expected_role and optional expected_label (null or omitted selects coordinate-only identity)")?;
+        return Ok(if action == "inspect_app_element" {
+            TaskInstruction::InspectAppElement {
                 point: params.point,
                 expected_role: params.expected_role,
                 expected_label: params.expected_label,
             }
         } else {
-            TaskInstruction::ActivateAppElement {
+            TaskInstruction::ClickAppElement {
                 point: params.point,
                 expected_role: params.expected_role,
                 expected_label: params.expected_label,
             }
+        });
+    }
+    if let Some(params) = value.strip_prefix("input_app_element=") {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Params {
+            point: [f64; 2],
+            text: String,
+        }
+        let params: Params = serde_json::from_str(params)
+            .context("input_app_element requires a JSON object with point and text")?;
+        return Ok(TaskInstruction::InputAppElement {
+            point: params.point,
+            text: params.text,
         });
     }
     if let Some(contact) = value.strip_prefix("open_chat=") {
@@ -154,15 +169,35 @@ mod tests {
         );
         assert!(instruction("search_contact=yes=张三").is_err());
         assert_eq!(
-            instruction(r#"locate_app_window_objects=["按钮","a=b"]"#).unwrap(),
-            TaskInstruction::LocateAppWindowObjects { objects: vec!["按钮".into(), "a=b".into()] }
+            instruction(r#"detection_app_window_objects=["按钮","a=b"]"#).unwrap(),
+            TaskInstruction::DetectionAppWindowObjects { objects: vec!["按钮".into(), "a=b".into()] }
         );
-        assert!(instruction("locate_app_window_objects=button").is_err());
+        assert!(instruction("detection_app_window_objects=button").is_err());
+    }
+
+    #[test]
+    fn element_instruction_preserves_explicit_identity_mode() {
+        for action in ["click_app_element", "inspect_app_element"] {
+            for label in ["", r#","expected_label":null"#, r#","expected_label":"Search""#] {
+                let step = instruction(&format!(
+                    r#"{action}={{"point":[100.0,200.0],"expected_role":"AXCell"{label}}}"#
+                )).unwrap();
+                let expected_label = if label.contains("Search") { Some("Search".to_owned()) } else { None };
+                assert_eq!(step, if action == "click_app_element" {
+                    TaskInstruction::ClickAppElement { point: [100.0, 200.0], expected_role: "AXCell".into(), expected_label }
+                } else {
+                    TaskInstruction::InspectAppElement { point: [100.0, 200.0], expected_role: "AXCell".into(), expected_label }
+                });
+            }
+            assert!(instruction(&format!(
+                r#"{action}={{"point":[100.0,200.0],"expected_role":"AXCell","extra":true}}"#
+            )).is_err());
+        }
     }
 
     #[test]
     fn cli_accepts_either_input_and_rejects_neither() {
-        assert!(Cli::try_parse_from(["cli", "rpa", "--app", "wecom", "--instruction", "launch_wecom"]).is_ok());
+        assert!(Cli::try_parse_from(["cli", "rpa", "--app", "wecom", "--instruction", "launch_app"]).is_ok());
         assert!(Cli::try_parse_from(["cli", "rpa", "--app", "wecom", "--message", "打开企业微信"]).is_ok());
         assert!(Cli::try_parse_from(["cli", "rpa", "--app", "wecom"]).is_err());
     }

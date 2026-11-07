@@ -47,7 +47,7 @@ pub fn request(request: &IpcRequest) -> anyhow::Result<IpcResponse> {
     // 90 seconds. A client timeout does not cancel an already dispatched task.
     let read_timeout = match request {
         IpcRequest::Rpa(task) if task.instructions.as_ref().is_some_and(|steps| {
-            steps.iter().any(|step| matches!(step, TaskInstruction::LocateAppWindowObjects { .. }))
+            steps.iter().any(|step| matches!(step, TaskInstruction::DetectionAppWindowObjects { .. }))
         }) => 1500,
         _ => 10,
     };

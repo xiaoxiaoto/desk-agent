@@ -1,9 +1,9 @@
-use crate::applications::wecom::{app_element_activation_capability, app_window_capture_capability, center_capability, center_wecom_window, launch_wecom};
+use crate::applications::wecom::{app_element_activation_capability, app_window_capture_capability, center_capability, center_wecom_window, launch_wecom, wecom_search_query_capability};
 use crate::interfaces::ipc::{self, IpcRequest, IpcResponse};
 use crate::kernel::task::{
     TaskError, TaskErrorCode, TaskErrorResponse, TaskPreflightError, TaskRequest, TaskResponse,
 };
-use crate::runtime::{invoke_task, app_element_activation_any_grant, app_element_diagnosis_any_grant, app_window_capture_authorized, app_window_conversion_any_grant, center_authorized, InvokeError};
+use crate::runtime::{invoke_task, app_element_activation_any_grant, app_element_diagnosis_any_grant, app_window_capture_authorized, app_window_conversion_any_grant, center_authorized, wecom_search_query_any_grant, InvokeError};
 use crate::{
     config::loader::RuntimeConfig,
     infrastructure::database,
@@ -46,6 +46,10 @@ struct InstructionCapability {
     app: &'static str,
     schema_version: &'static str,
     input_schema_ref: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_schema: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_result: Option<serde_json::Value>,
     available: bool,
     required_scopes: Vec<&'static str>,
     channels: Vec<&'static str>,
@@ -169,6 +173,17 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
         Some(false) => Some("No exact app element diagnosis grant exists"),
         Some(true) => activation.reason,
     };
+    let search_query = wecom_search_query_capability();
+    let search_query_grant = match state.security_database.as_deref() {
+        Some(database) => wecom_search_query_any_grant(database).await.ok(),
+        None => None,
+    };
+    let search_query_available = matches!(search_query.status, CapabilityStatus::Available) && search_query_grant == Some(true);
+    let search_query_reason = match search_query_grant {
+        None => Some("Authorization storage is unavailable"),
+        Some(false) => Some("No one-shot exact WeCom search query grant exists"),
+        Some(true) => search_query.reason,
+    };
     let vision_model_available = capture_available && local_vision_model_available().await;
     let vision_reason = if !capture_available {
         capture_reason
@@ -178,13 +193,14 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
         None
     };
     let entries = [
-        ("launch_wecom", "wecom.client.launch", "app.wecom.launch", available, reason),
-        ("center_wecom_window", "wecom.window.center", "app.wecom.window.manage", center_available, center_reason),
+        ("launch_app", "wecom.client.launch", "app.wecom.launch", available, reason),
+        ("center_app_window", "wecom.window.center", "app.wecom.window.manage", center_available, center_reason),
         ("capture_app_window", "desktop.window.capture", "desktop.window.capture", capture_available, capture_reason),
-        ("locate_app_window_objects", "vision.window.locate", "vision.window.locate", vision_model_available, vision_reason),
+        ("detection_app_window_objects", "vision.window.locate", "vision.window.locate", vision_model_available, vision_reason),
         ("convert_app_window_coordinates", "desktop.window.coordinates.convert", "desktop.window.coordinates.convert", conversion_available, conversion_reason),
-        ("activate_app_element", "wecom.element.activate", "wecom.element.activate", activation_available, activation_reason),
-        ("diagnose_app_element", "wecom.element.diagnose", "wecom.element.diagnose", diagnosis_available, diagnosis_reason),
+        ("click_app_element", "wecom.element.activate", "wecom.element.activate", activation_available, activation_reason),
+        ("inspect_app_element", "wecom.element.diagnose", "wecom.element.diagnose", diagnosis_available, diagnosis_reason),
+        ("input_app_element", "wecom.search.query.set", "wecom.search.query.set", search_query_available, search_query_reason),
         ("search_contact", "wecom.contact.search", "wecom.contact.read", false, Some("Contact search instruction is not implemented")),
         ("open_chat", "wecom.chat.open", "wecom.chat.read", false, Some("Open chat instruction is not implemented")),
         ("send_text", "wecom.message.send", "wecom.message.send", false, Some("Send text instruction is not implemented")),
@@ -198,13 +214,31 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
             app: "wecom",
             schema_version: "1",
             input_schema_ref: "https://wecom-use.local/schemas/task-instruction-v1.json",
+            input_schema: if action == "input_app_element" { Some(serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["action", "params"],
+                "properties": {
+                    "action": { "const": "input_app_element" },
+                    "params": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["point", "text"],
+                        "properties": {
+                            "point": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" }, "description": "Finite, exactly f32-representable global macOS top-left logical screen points" },
+                            "text": { "type": "string", "description": "1..256 UTF-8 bytes, nonblank and no control characters including CR/LF; preserved exactly without trimming" }
+                        }
+                    }
+                }
+            })) } else { None },
+            expected_result: if action == "input_app_element" { Some(serde_json::json!({ "text_input": true })) } else { None },
             available,
-            required_scopes: if action == "locate_app_window_objects" { vec!["desktop.window.capture", scope] } else { vec![scope] },
-            channels: if action == "locate_app_window_objects" { vec!["gui", "local_vision"] } else if action == "launch_wecom" || action == "center_wecom_window" || action == "capture_app_window" || action == "convert_app_window_coordinates" || action == "activate_app_element" || action == "diagnose_app_element" { vec!["gui"] } else { vec![] },
-            risk: if action == "diagnose_app_element" { "Reads the live accessibility element at the specified point without activating it" } else if action == "activate_app_element" { "Activates the specified WeCom element and may cause an external effect" } else if action == "locate_app_window_objects" { "Captures sensitive WeCom window content and discloses it to the local vision service" } else if action == "convert_app_window_coordinates" { "Reads capture-time WeCom window geometry; coordinates are snapshots, not authorization to act" } else if action == "center_wecom_window" { "Moves an existing WeCom window without resizing" } else if action == "capture_app_window" { "Captures sensitive WeCom window content to a private local file" } else { "No risk policy is implemented" },
-            confirmation: if action == "diagnose_app_element" { "Separate explicit local grant for the exact point, role and label required; catalog availability does not authorize a particular request" } else if action == "activate_app_element" { "Explicit one-shot local grant for the exact point, role and label required; catalog availability does not authorize a particular request" } else if action == "locate_app_window_objects" { "Separate explicit local capture and exact object-list vision grants required" } else if action == "convert_app_window_coordinates" { "Explicit local grant for the exact capture ID and boxes required; catalog availability does not authorize a particular request" } else if action == "center_wecom_window" || action == "capture_app_window" { "Explicit local grant required" } else { "No confirmation policy is implemented" },
-            verification: if action == "diagnose_app_element" { "Reports whether the read-only preflight matched at inspection time; does not authorize later activation" } else if action == "activate_app_element" { "A new focused or selected state must be independently observed; otherwise the outcome is unknown" } else { "Independent verification is not implemented" },
-            prerequisites: if action == "diagnose_app_element" { vec!["macOS", "Accessibility permission", "Exactly one running WeCom process with a main or sole window", "Global macOS top-left screen logical point within the frontmost unobstructed WeCom window and a matching live accessibility element", "Explicit exact diagnosis grant"] } else if action == "activate_app_element" { vec!["macOS", "Accessibility permission", "Exactly one running WeCom process with a main or sole window", "Global macOS top-left screen logical point within the frontmost unobstructed WeCom window and a matching live accessibility element", "Explicit one-shot exact activation grant"] } else if action == "convert_app_window_coordinates" { vec!["macOS", "A recent recorded app window capture with unchanged target and geometry", "Accessibility permission", "Screen recording permission already granted", "Explicit exact conversion grant"] } else if action == "locate_app_window_objects" { vec!["macOS", "Exactly one running WeCom process with a main or sole window", "Accessibility permission", "Screen recording permission", "Explicit app window capture grant", "Explicit vision.window.locate grant for the exact object list", "Local vision service at http://127.0.0.1/v1/chat/completions with model wevisone-vl-4b"] } else if action == "launch_wecom" { vec!["macOS", "Installed WeCom desktop application"] } else if action == "center_wecom_window" { vec!["macOS", "Running WeCom with a controllable window", "Accessibility permission", "Explicit local grant"] } else if action == "capture_app_window" { vec!["macOS", "Exactly one running WeCom process with a main or sole window", "Accessibility permission", "Screen recording permission", "Explicit app window capture grant"] } else { vec![] },
+            required_scopes: if action == "detection_app_window_objects" { vec!["desktop.window.capture", scope] } else { vec![scope] },
+            channels: if action == "detection_app_window_objects" { vec!["gui", "local_vision"] } else if action == "launch_app" || action == "center_app_window" || action == "capture_app_window" || action == "convert_app_window_coordinates" || action == "click_app_element" || action == "inspect_app_element" || action == "input_app_element" { vec!["gui"] } else { vec![] },
+            risk: if action == "input_app_element" { "Inputs sensitive text into the controlled WeCom header search field through Accessibility; never presses Enter, edits a chat composer, sends a message, or emits mouse/keyboard events" } else if action == "inspect_app_element" { "Reads the live accessibility element at the specified point without activating it; coordinate-only mode does not establish message identity" } else if action == "click_app_element" { "Clicks the specified WeCom element and may cause an external effect; coordinate-only mode does not establish message identity" } else if action == "detection_app_window_objects" { "Captures sensitive WeCom window content and discloses it to the local vision service" } else if action == "convert_app_window_coordinates" { "Reads capture-time WeCom window geometry; coordinates are snapshots, not authorization to act" } else if action == "center_app_window" { "Moves an existing WeCom window without resizing" } else if action == "capture_app_window" { "Captures sensitive WeCom window content to a private local file" } else { "No risk policy is implemented" },
+            confirmation: if action == "input_app_element" { "Separate explicit one-shot local wecom.search.query.set grant for the exact point and unmodified text digest required; capture/click grants are not reused; availability is advisory and cannot authorize any request" } else if action == "inspect_app_element" { "Separate explicit local grant for the exact point, role and optional label, including null, required; coordinate-only mode requires independent caller screenshot review and approval of the exact point/role; the model and catalog cannot authorize a request" } else if action == "click_app_element" { "Explicit one-shot local grant for the exact point, role and optional label, including null, required; coordinate-only mode requires independent caller screenshot review and approval of the exact point/role; the model and catalog cannot authorize a request" } else if action == "detection_app_window_objects" { "Separate explicit local capture and exact object-list vision grants required" } else if action == "convert_app_window_coordinates" { "Explicit local grant for the exact capture ID and boxes required; catalog availability does not authorize a particular request" } else if action == "center_app_window" || action == "capture_app_window" { "Explicit local grant required" } else { "No confirmation policy is implemented" },
+            verification: if action == "input_app_element" { "Adapter checks exact AXValue readback within 500ms and unchanged active app/window; this is not independent verification, so task verification remains not_performed; any dispatched failure is unknown and never retried" } else if action == "inspect_app_element" { "Reports whether the read-only preflight matched at inspection time; does not authorize later activation or establish message identity in coordinate-only mode" } else if action == "click_app_element" { "The same target must have an actual AXFocused or AXSelected false-to-true transition; otherwise the outcome is unknown; coordinate-only mode does not establish message identity" } else { "Independent verification is not implemented" },
+            prerequisites: if action == "input_app_element" { vec!["macOS", "Accessibility permission; no Screen Recording permission or screenshot required", "Exactly one running WeCom process with a main or sole frontmost unobstructed window", "Current WeCom GUI only: point hits the unique enabled AXTextField in the top 80 logical points of the window, height <=60 and positive width, parent AXSplitGroup, and a vertical AXSplitter separating it from every other header AXTextField; ambiguity is rejected", "Writable AXFocused and AXValue; exact application focused-element identity and live window/geometry revalidation", "Separate explicit one-shot exact search-field text grant; native and grant availability are advisory"] } else if action == "inspect_app_element" { vec!["macOS", "Accessibility permission", "Exactly one running WeCom process with a main or sole window", "Global macOS top-left screen logical point within the frontmost unobstructed WeCom window and a matching live accessibility element", "Explicit exact inspection grant"] } else if action == "click_app_element" { vec!["macOS", "Accessibility permission", "Exactly one running WeCom process with a main or sole window", "Global macOS top-left screen logical point within the frontmost unobstructed WeCom window and a matching live accessibility element", "Explicit one-shot exact click grant"] } else if action == "convert_app_window_coordinates" { vec!["macOS", "A recent recorded app window capture with unchanged target and geometry", "Accessibility permission", "Screen recording permission already granted", "Explicit exact conversion grant"] } else if action == "detection_app_window_objects" { vec!["macOS", "Exactly one running WeCom process with a main or sole window", "Accessibility permission", "Screen recording permission", "Explicit app window capture grant", "Explicit vision.window.locate grant for the exact object list", "Local vision service at http://127.0.0.1/v1/chat/completions with model wevisone-vl-4b"] } else if action == "launch_app" { vec!["macOS", "Installed WeCom desktop application"] } else if action == "center_app_window" { vec!["macOS", "Running WeCom with a controllable window", "Accessibility permission", "Explicit local grant"] } else if action == "capture_app_window" { vec!["macOS", "Exactly one running WeCom process with a main or sole window", "Accessibility permission", "Screen recording permission", "Explicit app window capture grant"] } else { vec![] },
             unavailable_reason: if available { None } else { Some(reason.unwrap_or("Capability unavailable")) },
         }).collect(),
     })
@@ -235,20 +269,21 @@ async fn execute_ipc_task(request: TaskRequest, database: Option<&SqlitePool>) -
         };
     }
     let mode = input.mode();
+    let app = input.app().to_owned();
     let instruction = input.resolve_instruction().expect("preflight resolves supported input");
     let request_id = uuid::Uuid::new_v4().to_string();
     match invoke_task(database, &request_id, input, launch_wecom, center_wecom_window).await {
         Ok((_, result)) => {
             let output = if let Some(output) = result {
                 output
-            } else if matches!(instruction, crate::kernel::task::TaskInstruction::LaunchWecom) {
+            } else if matches!(instruction, crate::kernel::task::TaskInstruction::LaunchApp) {
                 serde_json::json!({ "open_command_succeeded": true })
             } else {
                 serde_json::json!({ "window_position_submitted": true })
             };
-            IpcResponse::Task(TaskResponse::completed(request_id, mode, instruction, output))
+            IpcResponse::Task(TaskResponse::completed(request_id, &app, mode, instruction, output))
         },
-        Err(InvokeError::OutcomeUnknown) => IpcResponse::Task(TaskResponse::unknown(request_id, mode, instruction)),
+        Err(InvokeError::OutcomeUnknown) => IpcResponse::Task(TaskResponse::unknown(request_id, &app, mode, instruction)),
         Err(error) => {
             ipc_invoke_error(error, request_id)
         }
@@ -414,5 +449,37 @@ mod diagnostic_transport_tests {
         }
         let (_, Json(other)) = super::super::rpa::invoke_error_response(InvokeError::CapabilityUnavailable, "request".into());
         assert!(serde_json::to_value(other).unwrap()["error"].get("diagnostic_code").is_none());
+    }
+
+    #[tokio::test]
+    async fn search_catalog_is_separately_scoped_and_explicitly_advisory() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE local_capability_grants (app TEXT, capability TEXT, route TEXT, target TEXT, effect TEXT, parameters TEXT)").execute(&db).await.unwrap();
+        let state = AppState { database: db.clone(), security_database: Some(Arc::new(db.clone())) };
+        let Json(catalog) = capabilities(State(state.clone())).await;
+        let search = catalog.capabilities.iter().find(|entry| entry.instruction_action == "input_app_element").unwrap();
+        assert!(!search.available);
+        assert_eq!(search.unavailable_reason, Some("No one-shot exact WeCom search query grant exists"));
+        assert_eq!(search.capability_id, "wecom.search.query.set");
+        assert_eq!(search.required_scopes, ["wecom.search.query.set"]);
+        assert_eq!(search.channels, ["gui"]);
+        assert_eq!(search.expected_result, Some(serde_json::json!({ "text_input": true })));
+        let schema = search.input_schema.as_ref().unwrap();
+        assert_eq!(schema["properties"]["params"]["required"], serde_json::json!(["point", "text"]));
+        assert_eq!(schema["properties"]["params"]["additionalProperties"], false);
+        assert!(search.confirmation.contains("one-shot"));
+        assert!(search.confirmation.contains("advisory"));
+        assert!(search.verification.contains("not_performed"));
+        assert!(search.prerequisites.iter().any(|requirement| requirement.contains("Current WeCom GUI only")));
+        assert!(search.prerequisites.iter().any(|requirement| requirement.contains("no Screen Recording")));
+        let digest = format!("search-query-sha256:{}", "a".repeat(64));
+        sqlx::query("INSERT INTO local_capability_grants VALUES ('wecom', 'wecom.search.query.set', 'macos_gui', 'wecom_search_field', 'set_search_query', ?)").bind(digest).execute(&db).await.unwrap();
+        let Json(catalog) = capabilities(State(state)).await;
+        let search = catalog.capabilities.iter().find(|entry| entry.instruction_action == "input_app_element").unwrap();
+        assert_ne!(search.unavailable_reason, Some("No one-shot exact WeCom search query grant exists"));
+        let Json(catalog) = capabilities(State(AppState { database: db, security_database: None })).await;
+        let search = catalog.capabilities.iter().find(|entry| entry.instruction_action == "input_app_element").unwrap();
+        assert!(!search.available);
+        assert_eq!(search.unavailable_reason, Some("Authorization storage is unavailable"));
     }
 }
