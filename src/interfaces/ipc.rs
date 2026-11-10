@@ -1,4 +1,5 @@
-use crate::kernel::task::{TaskErrorResponse, TaskInstruction, TaskRequest, TaskResponse};
+use crate::kernel::instruction::{ApplicationInstruction, PerceptionInstruction, TaskInstruction};
+use crate::kernel::task::{TaskErrorResponse, TaskRequest, TaskResponse};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
@@ -46,8 +47,14 @@ pub fn request(request: &IpcRequest) -> anyhow::Result<IpcResponse> {
     // Vision uses up to 16 sequential local inference calls, each bounded to
     // 90 seconds. A client timeout does not cancel an already dispatched task.
     let read_timeout = match request {
+        // Up to 600 seconds of authorized inter-message delay, bounded native
+        // operations for 100 messages, and cache-miss/contact vision inference.
+        // This only changes waiting; there is no cancellation or replay.
         IpcRequest::Rpa(task) if task.instructions.as_ref().is_some_and(|steps| {
-            steps.iter().any(|step| matches!(step, TaskInstruction::DetectionAppWindowObjects { .. }))
+            steps.iter().any(|step| matches!(step, TaskInstruction::Application(ApplicationInstruction::SendMessageByNickname { .. })))
+        }) => 2400,
+        IpcRequest::Rpa(task) if task.instructions.as_ref().is_some_and(|steps| {
+            steps.iter().any(|step| matches!(step, TaskInstruction::Perception(PerceptionInstruction::VisionDetect{ .. })))
         }) => 1500,
         _ => 10,
     };

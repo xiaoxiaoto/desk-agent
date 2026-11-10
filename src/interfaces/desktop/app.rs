@@ -1,4 +1,5 @@
-use crate::kernel::task::{TaskInstruction, TaskRequest, WECOM_APP_ID};
+use crate::kernel::instruction::{AtomicInstruction, TaskInstruction};
+use crate::kernel::task::{TaskRequest, WECOM_APP_ID};
 use crate::interfaces::ipc::{self, IpcRequest, IpcResponse};
 use eframe::egui;
 
@@ -29,7 +30,7 @@ impl eframe::App for DeskAgentApp {
                     protocol_version: crate::kernel::task::PROTOCOL_VERSION.to_owned(),
                     app: WECOM_APP_ID.to_owned(),
                     messages: Vec::new(),
-                    instructions: Some(vec![TaskInstruction::LaunchApp]),
+                    instructions: Some(vec![TaskInstruction::Atomic(AtomicInstruction::ProcessLaunch)]),
                 }));
             }
             ui.label(&self.status);

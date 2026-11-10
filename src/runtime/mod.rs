@@ -1,6 +1,12 @@
 pub mod permission;
+mod nickname;
+// All local runtime GUI tasks share this guard. Composite children never recurse
+// through invoke_task, so the whole batch (including waits) owns it exactly once.
+static GUI_EXECUTOR: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub use nickname::{send_message_by_nickname_any_grant, send_message_by_nickname_parameters, revoke_send_message_by_nickname};
 
-use crate::kernel::task::{ActivationDiagnostic, TaskInput, TaskInstruction};
+use crate::kernel::instruction::{ApplicationInstruction, AtomicInstruction, PerceptionInstruction, TaskInstruction};
+use crate::kernel::task::{valid_key_input, ActivationDiagnostic, TaskInput};
 use sqlx::SqlitePool;
 use sha2::{Digest, Sha256};
 use crate::applications::wecom::AppWindowCapture;
@@ -15,7 +21,13 @@ const WINDOW_LOCATE: (&str, &str, &str) = ("vision.window.locate", "main_or_sing
 const WINDOW_CONVERT: (&str, &str, &str) = ("desktop.window.coordinates.convert", "main_or_single_app_window", "read_geometry");
 const ELEMENT_ACTIVATE: (&str, &str, &str) = ("wecom.element.activate", "main_or_single_app_window", "activate_element");
 const ELEMENT_DIAGNOSE: (&str, &str, &str) = ("wecom.element.diagnose", "main_or_single_app_window", "inspect_element");
+const ELEMENT_FOCUS: (&str, &str, &str) = ("desktop.element.focus", "main_or_single_app_window", "focus_element");
+const KEY_INPUT: (&str, &str, &str) = ("desktop.keyboard.key_input", "main_or_single_app_window", "key_input");
 const SEARCH_QUERY: (&str, &str, &str) = ("wecom.search.query.set", "wecom_search_field", "set_search_query");
+const ELEMENT_INPUT: (&str, &str, &str) = ("desktop.element.input", "main_or_single_app_window", "replace_text");
+const CHAT_OPEN: (&str, &str, &str) = ("wecom.chat.open", "search_result_contact", "open_chat");
+const CHAT_DRAFT: (&str, &str, &str) = ("wecom.chat.draft.write", "current_contact_empty_message_editor", "write_chat_draft");
+const CHAT_DRAFT_SEND: (&str, &str, &str) = ("wecom.chat.draft.send", "current_contact_exact_message_editor", "send_chat_draft");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvokeError {
@@ -61,64 +73,85 @@ pub async fn app_element_diagnosis_any_grant(database: &SqlitePool) -> Result<bo
         .fetch_one(database).await.map(|v| v == 1)
 }
 
-/// Advisory only: each exact search-field text and point needs its own one-shot grant.
-pub async fn wecom_search_query_any_grant(database: &SqlitePool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND length(parameters) = 84 AND substr(parameters, 1, 20) = 'search-query-sha256:' AND substr(parameters, 21) NOT GLOB '*[^0-9a-f]*')")
-        .bind(SEARCH_QUERY.0).bind(ROUTE).bind(SEARCH_QUERY.1).bind(SEARCH_QUERY.2)
+/// Advisory only: focus requires an exact, separately scoped grant.
+pub async fn app_element_focus_any_grant(database: &SqlitePool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND length(parameters) = 80 AND substr(parameters, 1, 16) = 'focus-v1-sha256:' AND substr(parameters, 17) NOT GLOB '*[^0-9a-f]*')")
+        .bind(ELEMENT_FOCUS.0).bind(ROUTE).bind(ELEMENT_FOCUS.1).bind(ELEMENT_FOCUS.2)
         .fetch_one(database).await.map(|v| v == 1)
 }
 
-/// Compact JSON field order and the unmodified text are part of the grant contract.
-pub fn wecom_search_query_parameters(point: [f64; 2], text: &str) -> Result<String, serde_json::Error> {
+/// Advisory only: key input requires an exact, separately scoped grant.
+pub async fn app_key_input_any_grant(database: &SqlitePool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND length(parameters) = 84 AND substr(parameters, 1, 20) = 'key-input-v1-sha256:' AND substr(parameters, 21) NOT GLOB '*[^0-9a-f]*')")
+        .bind(KEY_INPUT.0).bind(ROUTE).bind(KEY_INPUT.1).bind(KEY_INPUT.2)
+        .fetch_one(database).await.map(|v| v == 1)
+}
+
+
+/// Advisory only: dispatch still checks the exact point and text.
+pub async fn app_element_input_any_grant(database: &SqlitePool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND length(parameters) = 88 AND substr(parameters, 1, 24) = 'element-input-v1-sha256:' AND substr(parameters, 25) NOT GLOB '*[^0-9a-f]*')")
+        .bind(ELEMENT_INPUT.0).bind(ROUTE).bind(ELEMENT_INPUT.1).bind(ELEMENT_INPUT.2)
+        .fetch_one(database).await.map(|v| v == 1)
+}
+
+
+pub fn app_element_input_parameters(point: [f64; 2], text: &str) -> Result<String, serde_json::Error> {
+    text_input_parameters(point, text, "element-input-v1-sha256:")
+}
+
+fn text_input_parameters(point: [f64; 2], text: &str, prefix: &str) -> Result<String, serde_json::Error> {
     #[derive(serde::Serialize)]
     struct Parameters<'a> {
         point: [f64; 2],
         text: &'a str,
     }
     let encoded = serde_json::to_vec(&Parameters { point, text })?;
-    Ok(format!("search-query-sha256:{:x}", Sha256::digest(encoded)))
+    Ok(format!("{prefix}{:x}", Sha256::digest(encoded)))
 }
 
-async fn audit_search_query(database: &SqlitePool, request_id: &str, parameters: &str, decision: &str) -> Result<(), sqlx::Error> {
+async fn audit_text_input(database: &SqlitePool, request_id: &str, parameters: &str, decision: &str, scope: (&str, &str, &str)) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)")
-        .bind(request_id).bind(SEARCH_QUERY.0).bind(ROUTE).bind(SEARCH_QUERY.1).bind(SEARCH_QUERY.2).bind(parameters).bind(decision)
+        .bind(request_id).bind(scope.0).bind(ROUTE).bind(scope.1).bind(scope.2).bind(parameters).bind(decision)
         .execute(database).await?;
     Ok(())
 }
 
 // The consuming recheck and its durable audit commit together before any focus/write.
-async fn authorize_search_query(database: &SqlitePool, request_id: &str, parameters: &str, consume: bool) -> Result<bool, sqlx::Error> {
+async fn authorize_text_input(database: &SqlitePool, request_id: &str, parameters: &str, consume: bool, scope: (&str, &str, &str)) -> Result<bool, sqlx::Error> {
     let mut tx = database.begin().await?;
     let insert = "INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)";
-    sqlx::query(insert).bind(request_id).bind(SEARCH_QUERY.0).bind(ROUTE).bind(SEARCH_QUERY.1).bind(SEARCH_QUERY.2).bind(parameters).bind("authorization_check").execute(&mut *tx).await?;
+    sqlx::query(insert).bind(request_id).bind(scope.0).bind(ROUTE).bind(scope.1).bind(scope.2).bind(parameters).bind("authorization_check").execute(&mut *tx).await?;
     let granted = if consume {
         sqlx::query("DELETE FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?")
-            .bind(SEARCH_QUERY.0).bind(ROUTE).bind(SEARCH_QUERY.1).bind(SEARCH_QUERY.2).bind(parameters)
+            .bind(scope.0).bind(ROUTE).bind(scope.1).bind(scope.2).bind(parameters)
             .execute(&mut *tx).await?.rows_affected() == 1
     } else {
         sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?)")
-            .bind(SEARCH_QUERY.0).bind(ROUTE).bind(SEARCH_QUERY.1).bind(SEARCH_QUERY.2).bind(parameters)
+            .bind(scope.0).bind(ROUTE).bind(scope.1).bind(scope.2).bind(parameters)
             .fetch_one(&mut *tx).await? == 1
     };
     let decision = if !granted { "denied" } else if consume { "dispatch_authorized" } else { "grant_allowed" };
-    sqlx::query(insert).bind(request_id).bind(SEARCH_QUERY.0).bind(ROUTE).bind(SEARCH_QUERY.1).bind(SEARCH_QUERY.2).bind(parameters).bind(decision).execute(&mut *tx).await?;
+    sqlx::query(insert).bind(request_id).bind(scope.0).bind(ROUTE).bind(scope.1).bind(scope.2).bind(parameters).bind(decision).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(granted)
 }
 
-async fn set_search_query_authorized(
+async fn text_input_authorized(
     database: &SqlitePool,
     request_id: &str,
     point: [f64; 2],
     text: String,
+    scope: (&str, &str, &str),
+    prefix: &str,
     preflight: impl FnOnce([f64; 2], &str) -> Result<(), ActivationDiagnostic> + Send + 'static,
     dispatch: impl FnOnce([f64; 2], &str) -> anyhow::Result<()> + Send + 'static,
 ) -> Result<(), InvokeError> {
     if !crate::kernel::task::valid_app_input(&point, &text) {
         return Err(InvokeError::InvalidInput);
     }
-    let parameters = wecom_search_query_parameters(point, &text).map_err(|_| InvokeError::InvalidInput)?;
-    if !authorize_search_query(database, request_id, &parameters, false).await.map_err(|_| InvokeError::AuditUnavailable)? {
+    let parameters = text_input_parameters(point, &text, prefix).map_err(|_| InvokeError::InvalidInput)?;
+    if !authorize_text_input(database, request_id, &parameters, false, scope).await.map_err(|_| InvokeError::AuditUnavailable)? {
         return Err(InvokeError::Forbidden);
     }
     // No native inspection, permission request, focus or write precedes the exact grant.
@@ -134,21 +167,22 @@ async fn set_search_query_authorized(
                 _ => ActivationDiagnostic::PreflightUnavailable,
             };
             let decision = format!("not_dispatched_{}", diagnostic.as_str());
-            audit_search_query(database, request_id, &parameters, &decision).await.map_err(|_| InvokeError::AuditUnavailable)?;
+            audit_text_input(database, request_id, &parameters, &decision, scope).await.map_err(|_| InvokeError::AuditUnavailable)?;
             return Err(InvokeError::ActivationPreflight(diagnostic));
         }
     };
-    if !authorize_search_query(database, request_id, &parameters, true).await.map_err(|_| InvokeError::AuditUnavailable)? {
+    if !authorize_text_input(database, request_id, &parameters, true, scope).await.map_err(|_| InvokeError::AuditUnavailable)? {
         return Err(InvokeError::Forbidden);
     }
     let result = tokio::task::spawn_blocking(move || dispatch(point, &text)).await;
     let succeeded = matches!(result, Ok(Ok(())));
     // No error contents or plaintext text enter ordinary audit or task responses.
-    audit_search_query(database, request_id, &parameters, if succeeded { "dispatch_succeeded" } else { "dispatch_outcome_unknown" })
+    audit_text_input(database, request_id, &parameters, if succeeded { "dispatch_succeeded" } else { "dispatch_outcome_unknown" }, scope)
         .await.map_err(|_| InvokeError::OutcomeUnknown)?;
     if !succeeded { return Err(InvokeError::OutcomeUnknown); }
     Ok(())
 }
+
 
 /// Field order, explicit null labels and compact JSON serialization are part of the authorization contract.
 pub fn app_element_activation_parameters(point: [f64; 2], expected_role: &str, expected_label: Option<&str>) -> Result<String, serde_json::Error> {
@@ -157,6 +191,20 @@ pub fn app_element_activation_parameters(point: [f64; 2], expected_role: &str, e
 
 pub fn app_element_diagnosis_parameters(point: [f64; 2], expected_role: &str, expected_label: Option<&str>) -> Result<String, serde_json::Error> {
     app_element_parameters("diagnose-v3-sha256:", point, expected_role, expected_label)
+}
+
+pub fn app_element_focus_parameters(point: [f64; 2], expected_role: &str, expected_label: Option<&str>) -> Result<String, serde_json::Error> {
+    app_element_parameters("focus-v1-sha256:", point, expected_role, expected_label)
+}
+
+pub fn app_key_input_parameters(key: &str, modifiers: &[String]) -> Result<String, serde_json::Error> {
+    #[derive(serde::Serialize)]
+    struct Parameters<'a> {
+        key: &'a str,
+        modifiers: &'a [String],
+    }
+    let encoded = serde_json::to_vec(&Parameters { key, modifiers })?;
+    Ok(format!("key-input-v1-sha256:{:x}", Sha256::digest(encoded)))
 }
 
 fn app_element_parameters(prefix: &str, point: [f64; 2], expected_role: &str, expected_label: Option<&str>) -> Result<String, serde_json::Error> {
@@ -214,6 +262,58 @@ async fn audit_diagnosis(database: &SqlitePool, request_id: &str, parameters: &s
         .bind(request_id).bind(ELEMENT_DIAGNOSE.0).bind(ROUTE).bind(ELEMENT_DIAGNOSE.1).bind(ELEMENT_DIAGNOSE.2).bind(parameters).bind(decision)
         .execute(database).await?;
     Ok(())
+}
+
+async fn audit_focus(database: &SqlitePool, request_id: &str, parameters: &str, decision: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)")
+        .bind(request_id).bind(ELEMENT_FOCUS.0).bind(ROUTE).bind(ELEMENT_FOCUS.1).bind(ELEMENT_FOCUS.2).bind(parameters).bind(decision)
+        .execute(database).await?;
+    Ok(())
+}
+
+async fn authorize_focus(database: &SqlitePool, request_id: &str, parameters: &str, consume: bool) -> Result<bool, sqlx::Error> {
+    let mut tx = database.begin().await?;
+    let insert = "INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)";
+    sqlx::query(insert).bind(request_id).bind(ELEMENT_FOCUS.0).bind(ROUTE).bind(ELEMENT_FOCUS.1).bind(ELEMENT_FOCUS.2).bind(parameters).bind("authorization_check").execute(&mut *tx).await?;
+    let granted = if consume {
+        sqlx::query("DELETE FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?")
+            .bind(ELEMENT_FOCUS.0).bind(ROUTE).bind(ELEMENT_FOCUS.1).bind(ELEMENT_FOCUS.2).bind(parameters)
+            .execute(&mut *tx).await?.rows_affected() == 1
+    } else {
+        sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?)")
+            .bind(ELEMENT_FOCUS.0).bind(ROUTE).bind(ELEMENT_FOCUS.1).bind(ELEMENT_FOCUS.2).bind(parameters)
+            .fetch_one(&mut *tx).await? == 1
+    };
+    let decision = if !granted { "denied" } else if consume { "dispatch_authorized" } else { "grant_allowed" };
+    sqlx::query(insert).bind(request_id).bind(ELEMENT_FOCUS.0).bind(ROUTE).bind(ELEMENT_FOCUS.1).bind(ELEMENT_FOCUS.2).bind(parameters).bind(decision).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(granted)
+}
+
+async fn audit_key_input(database: &SqlitePool, request_id: &str, parameters: &str, decision: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)")
+        .bind(request_id).bind(KEY_INPUT.0).bind(ROUTE).bind(KEY_INPUT.1).bind(KEY_INPUT.2).bind(parameters).bind(decision)
+        .execute(database).await?;
+    Ok(())
+}
+
+async fn authorize_key_input(database: &SqlitePool, request_id: &str, parameters: &str, consume: bool) -> Result<bool, sqlx::Error> {
+    let mut tx = database.begin().await?;
+    let insert = "INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)";
+    sqlx::query(insert).bind(request_id).bind(KEY_INPUT.0).bind(ROUTE).bind(KEY_INPUT.1).bind(KEY_INPUT.2).bind(parameters).bind("authorization_check").execute(&mut *tx).await?;
+    let granted = if consume {
+        sqlx::query("DELETE FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?")
+            .bind(KEY_INPUT.0).bind(ROUTE).bind(KEY_INPUT.1).bind(KEY_INPUT.2).bind(parameters)
+            .execute(&mut *tx).await?.rows_affected() == 1
+    } else {
+        sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?)")
+            .bind(KEY_INPUT.0).bind(ROUTE).bind(KEY_INPUT.1).bind(KEY_INPUT.2).bind(parameters)
+            .fetch_one(&mut *tx).await? == 1
+    };
+    let decision = if !granted { "denied" } else if consume { "dispatch_authorized" } else { "grant_allowed" };
+    sqlx::query(insert).bind(request_id).bind(KEY_INPUT.0).bind(ROUTE).bind(KEY_INPUT.1).bind(KEY_INPUT.2).bind(parameters).bind(decision).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(granted)
 }
 
 
@@ -360,16 +460,35 @@ pub async fn invoke_task(
     launch: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
     center: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
 ) -> Result<(TaskInstruction, Option<serde_json::Value>), InvokeError> {
+    let database = database.cloned();
+    let request_id = request_id.to_owned();
+    // A disconnect only drops the waiter, not the admitted operation or its
+    // GUI executor guard. Native input cannot be cancelled by dropping a future.
+    tokio::spawn(async move {
+        invoke_task_owned(database.as_ref(), &request_id, input, launch, center).await
+    })
+    .await
+    .map_err(|_| InvokeError::OutcomeUnknown)?
+}
+
+async fn invoke_task_owned(
+    database: Option<&SqlitePool>,
+    request_id: &str,
+    input: TaskInput,
+    launch: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+    center: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+) -> Result<(TaskInstruction, Option<serde_json::Value>), InvokeError> {
     if input.app() != "wecom" {
         return Err(InvokeError::CapabilityUnavailable);
     }
     let instruction = input.resolve_instruction().map_err(|_| InvokeError::InvalidInput)?;
+    let _gui = GUI_EXECUTOR.lock().await;
     let mut output = None;
     match &instruction {
-        TaskInstruction::LaunchApp => {
+        TaskInstruction::Atomic(AtomicInstruction::ProcessLaunch) => {
             tokio::task::spawn_blocking(launch).await.map_err(|_| InvokeError::OutcomeUnknown)?.map_err(|_| InvokeError::OutcomeUnknown)?;
         }
-        TaskInstruction::CenterAppWindow => {
+        TaskInstruction::Atomic(AtomicInstruction::WindowCenter) => {
             let database = database.ok_or(InvokeError::AuditUnavailable)?;
             if !authorize_and_record(database, request_id, CENTER, "grant_allowed").await.map_err(|_| InvokeError::AuditUnavailable)? {
                 return Err(InvokeError::Forbidden);
@@ -390,12 +509,12 @@ pub async fn invoke_task(
                 .await.map_err(|_| InvokeError::OutcomeUnknown)?;
             if !succeeded { return Err(InvokeError::OutcomeUnknown); }
         }
-        TaskInstruction::CaptureAppWindow => {
+        TaskInstruction::Atomic(AtomicInstruction::WindowCapture) => {
             let database = database.ok_or(InvokeError::AuditUnavailable)?;
             let (capture, _) = capture_authorized(database, request_id).await?;
             output = Some(serde_json::json!({ "path": capture.path, "capture_id": capture.capture_id }));
         }
-        TaskInstruction::ConvertAppWindowCoordinates { capture_id, boxes } => {
+        TaskInstruction::Perception(PerceptionInstruction::ScreenshotCoordinatesConvert{ capture_id, boxes }) => {
             let database = database.ok_or(InvokeError::AuditUnavailable)?;
             if boxes.is_empty() || boxes.len() > 100 || boxes.iter().any(|b| {
                 !b.iter().all(|v| v.is_finite()) || b[0] < 0.0 || b[1] < 0.0 || b[0] >= b[2] || b[1] >= b[3]
@@ -433,7 +552,7 @@ pub async fn invoke_task(
                 "screen_coordinate_space": "macos_global_top_left_points_at_capture"
             }));
         }
-        TaskInstruction::DetectionAppWindowObjects { objects } => {
+        TaskInstruction::Perception(PerceptionInstruction::VisionDetect{ objects }) => {
             let database = database.ok_or(InvokeError::AuditUnavailable)?;
             let parameters = app_window_locate_parameters(objects).map_err(|_| InvokeError::InvalidInput)?;
             // Disclosure authorization is required before even prompting for window capture.
@@ -494,19 +613,48 @@ pub async fn invoke_task(
                 "screen_coordinate_space": "macos_global_top_left_points_at_capture"
             }));
         }
-        TaskInstruction::InputAppElement { point, text } => {
+        TaskInstruction::Application(ApplicationInstruction::SendMessageByNickname { nickname, messages, interval_ms }) => {
             let database = database.ok_or(InvokeError::AuditUnavailable)?;
-            set_search_query_authorized(
-                database,
-                request_id,
-                *point,
-                text.clone(),
-                crate::applications::wecom::preflight_wecom_search_field_input,
-                crate::applications::wecom::input_wecom_search_field_text,
+            output = Some(nickname::invoke(database, request_id, nickname, messages, *interval_ms, launch, center).await?);
+        }
+        TaskInstruction::Atomic(AtomicInstruction::KeyboardTextInput { point, text }) => {
+            let database = database.ok_or(InvokeError::AuditUnavailable)?;
+            text_input_authorized(
+                database, request_id, *point, text.clone(), ELEMENT_INPUT, "element-input-v1-sha256:",
+                crate::applications::wecom::preflight_app_element_input,
+                crate::applications::wecom::input_app_element_text,
             ).await?;
             output = Some(serde_json::json!({ "text_input": true }));
         }
-        TaskInstruction::ClickAppElement { point, expected_role, expected_label } => {
+        TaskInstruction::Atomic(AtomicInstruction::KeyboardKeyInput { key, modifiers }) => {
+            let database = database.ok_or(InvokeError::AuditUnavailable)?;
+            if !valid_key_input(key, modifiers) { return Err(InvokeError::InvalidInput); }
+            let parameters = app_key_input_parameters(key, modifiers).map_err(|_| InvokeError::InvalidInput)?;
+            if !authorize_key_input(database, request_id, &parameters, false).await.map_err(|_| InvokeError::AuditUnavailable)? {
+                return Err(InvokeError::Forbidden);
+            }
+            let preflight = tokio::task::spawn_blocking(crate::applications::wecom::preflight_keyboard_key_input).await;
+            let diagnostic = match preflight {
+                Ok(Ok(())) => None,
+                Ok(Err(diagnostic)) => Some(diagnostic),
+                Err(_) => Some(ActivationDiagnostic::PreflightUnavailable),
+            };
+            if let Some(diagnostic) = diagnostic {
+                let decision = format!("not_dispatched_{}", diagnostic.as_str());
+                audit_key_input(database, request_id, &parameters, &decision).await.map_err(|_| InvokeError::AuditUnavailable)?;
+                return Err(InvokeError::ActivationPreflight(diagnostic));
+            }
+            if !authorize_key_input(database, request_id, &parameters, true).await.map_err(|_| InvokeError::AuditUnavailable)? {
+                return Err(InvokeError::Forbidden);
+            }
+            let result = tokio::task::spawn_blocking(crate::applications::wecom::press_return_key).await;
+            let succeeded = matches!(result, Ok(Ok(())));
+            audit_key_input(database, request_id, &parameters, if succeeded { "dispatch_succeeded" } else { "dispatch_outcome_unknown" })
+                .await.map_err(|_| InvokeError::OutcomeUnknown)?;
+            if !succeeded { return Err(InvokeError::OutcomeUnknown); }
+            output = Some(serde_json::json!({ "pressed": true }));
+        }
+        TaskInstruction::Atomic(AtomicInstruction::ClickButton{ point, expected_role, expected_label }) => {
             let database = database.ok_or(InvokeError::AuditUnavailable)?;
             if !point.iter().all(|v| v.is_finite())
                 || expected_role.is_empty() || expected_role.len() > 256
@@ -541,7 +689,42 @@ pub async fn invoke_task(
             if !succeeded { return Err(InvokeError::OutcomeUnknown); }
             output = Some(serde_json::json!({ "clicked": true }));
         }
-        TaskInstruction::InspectAppElement { point, expected_role, expected_label } => {
+        TaskInstruction::Atomic(AtomicInstruction::ClickFocus{ point, expected_role, expected_label }) => {
+            let database = database.ok_or(InvokeError::AuditUnavailable)?;
+            if !point.iter().all(|v| v.is_finite())
+                || expected_role.is_empty() || expected_role.len() > 256
+                || expected_label.as_ref().is_some_and(|label| label.is_empty() || label.len() > 256)
+            {
+                return Err(InvokeError::InvalidInput);
+            }
+            let parameters = app_element_focus_parameters(*point, expected_role, expected_label.as_deref()).map_err(|_| InvokeError::InvalidInput)?;
+            if !authorize_focus(database, request_id, &parameters, false).await.map_err(|_| InvokeError::AuditUnavailable)? {
+                return Err(InvokeError::Forbidden);
+            }
+            let (role, label, position) = (expected_role.clone(), expected_label.clone(), *point);
+            let preflight = tokio::task::spawn_blocking(move || crate::applications::wecom::preflight_app_element(position, &role, label.as_deref())).await;
+            let diagnostic = match preflight {
+                Ok(Ok(())) => None,
+                Ok(Err(diagnostic)) => Some(diagnostic),
+                Err(_) => Some(ActivationDiagnostic::PreflightUnavailable),
+            };
+            if let Some(diagnostic) = diagnostic {
+                let decision = format!("not_dispatched_{}", diagnostic.as_str());
+                audit_focus(database, request_id, &parameters, &decision).await.map_err(|_| InvokeError::AuditUnavailable)?;
+                return Err(InvokeError::ActivationPreflight(diagnostic));
+            }
+            let (role, label, position) = (expected_role.clone(), expected_label.clone(), *point);
+            if !authorize_focus(database, request_id, &parameters, true).await.map_err(|_| InvokeError::AuditUnavailable)? {
+                return Err(InvokeError::Forbidden);
+            }
+            let result = tokio::task::spawn_blocking(move || crate::applications::wecom::focus_app_element(position, &role, label.as_deref())).await;
+            let succeeded = matches!(result, Ok(Ok(())));
+            audit_focus(database, request_id, &parameters, if succeeded { "dispatch_succeeded" } else { "dispatch_outcome_unknown" })
+                .await.map_err(|_| InvokeError::OutcomeUnknown)?;
+            if !succeeded { return Err(InvokeError::OutcomeUnknown); }
+            output = Some(serde_json::json!({ "focused": true }));
+        }
+        TaskInstruction::Atomic(AtomicInstruction::AxInspect{ point, expected_role, expected_label }) => {
             let database = database.ok_or(InvokeError::AuditUnavailable)?;
             if !point.iter().all(|v| v.is_finite())
                 || expected_role.is_empty() || expected_role.len() > 256
@@ -573,7 +756,6 @@ pub async fn invoke_task(
             }
             output = Some(serde_json::json!({ "diagnostic_code": "matched" }));
         }
-        _ => return Err(InvokeError::InvalidInput),
     }
     Ok((instruction, output))
 }
@@ -691,9 +873,8 @@ mod coordinate_tests {
 }
 
 #[cfg(test)]
-mod search_query_authorization_tests {
+mod text_input_authorization_tests {
     use super::*;
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
     const QUERY: &str = "  私密 search  ";
     const POINT: [f64; 2] = [492.0, 203.0];
@@ -706,106 +887,32 @@ mod search_query_authorization_tests {
     }
 
     async fn grant(db: &SqlitePool) {
-        let parameters = wecom_search_query_parameters(POINT, QUERY).unwrap();
+        let parameters = "parent-delegated-child-only";
         sqlx::query("INSERT INTO local_capability_grants VALUES ('wecom', 'wecom.search.query.set', 'macos_gui', 'wecom_search_field', 'set_search_query', ?)").bind(parameters).execute(db).await.unwrap();
     }
 
-    async fn run(
-        db: &SqlitePool,
-        id: &str,
-        preflight: impl FnOnce([f64; 2], &str) -> Result<(), ActivationDiagnostic> + Send + 'static,
-        dispatch: impl FnOnce([f64; 2], &str) -> anyhow::Result<()> + Send + 'static,
-    ) -> Result<(), InvokeError> {
-        let request: crate::kernel::task::TaskRequest = serde_json::from_value(serde_json::json!({
-            "protocol_version": "1", "app": "wecom",
-            "instructions": [{ "action": "input_app_element", "params": { "point": POINT, "text": QUERY } }]
-        })).unwrap();
-        let input = request.into_task_input().unwrap();
-        input.preflight().unwrap();
-        let TaskInstruction::InputAppElement { point, text } = input.resolve_instruction().unwrap() else { panic!("input instruction expected"); };
-        set_search_query_authorized(db, id, point, text, preflight, dispatch).await
-    }
 
     #[tokio::test]
-    async fn exact_query_is_preserved_and_consumed_once_without_audit_leakage() {
+    async fn generic_input_requires_its_own_exact_one_shot_grant() {
         let db = database().await;
-        assert_eq!(run(&db, "denied", |_, _| panic!("unauthorized native preflight"), |_, _| panic!("unauthorized dispatch")).await, Err(InvokeError::Forbidden));
         grant(&db).await;
-        let calls = Arc::new(AtomicUsize::new(0));
-        let dispatch_calls = calls.clone();
-        assert_eq!(run(&db, "first", |point, query| {
-            assert_eq!(point, POINT);
-            assert_eq!(query, QUERY);
-            Ok(())
-        }, move |point, query| {
-            assert_eq!(point, POINT);
-            assert_eq!(query, QUERY);
-            dispatch_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }).await, Ok(()));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(!wecom_search_query_any_grant(&db).await.unwrap());
-        assert_eq!(run(&db, "replay", |_, _| panic!("consumed preflight"), |_, _| panic!("consumed dispatch")).await, Err(InvokeError::Forbidden));
-        let decisions: Vec<String> = sqlx::query_scalar("SELECT decision FROM capability_audit WHERE request_id = 'first' ORDER BY rowid").fetch_all(&db).await.unwrap();
+        let digest = app_element_input_parameters(POINT, QUERY).unwrap();
+        let encoded = serde_json::to_vec(&serde_json::json!({"point": POINT, "text": QUERY})).unwrap();
+        assert_eq!(digest, format!("element-input-v1-sha256:{:x}", Sha256::digest(encoded)));
+        assert!(!app_element_input_any_grant(&db).await.unwrap());
+        assert_eq!(text_input_authorized(&db, "wrong-scope", POINT, QUERY.into(), ELEMENT_INPUT, "element-input-v1-sha256:", |_, _| panic!("unauthorized preflight"), |_, _| panic!("unauthorized dispatch")).await, Err(InvokeError::Forbidden));
+        sqlx::query("INSERT INTO local_capability_grants VALUES ('wecom', 'desktop.element.input', 'macos_gui', 'main_or_single_app_window', 'replace_text', ?)").bind(&digest).execute(&db).await.unwrap();
+        assert!(app_element_input_any_grant(&db).await.unwrap());
+        assert_eq!(text_input_authorized(&db, "preflight-failed", POINT, QUERY.into(), ELEMENT_INPUT, "element-input-v1-sha256:", |_, _| Err(ActivationDiagnostic::PreflightUnavailable), |_, _| panic!("failed preflight dispatch")).await, Err(InvokeError::ActivationPreflight(ActivationDiagnostic::PreflightUnavailable)));
+        assert!(app_element_input_any_grant(&db).await.unwrap());
+        assert_eq!(text_input_authorized(&db, "success", POINT, QUERY.into(), ELEMENT_INPUT, "element-input-v1-sha256:", |_, _| Ok(()), |point, text| { assert_eq!(point, POINT); assert_eq!(text, QUERY); Ok(()) }).await, Ok(()));
+        assert!(!app_element_input_any_grant(&db).await.unwrap());
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM local_capability_grants WHERE capability = 'wecom.search.query.set'").fetch_one(&db).await.unwrap();
+        assert_eq!(remaining, 1);
+        assert_eq!(text_input_authorized(&db, "replay", POINT, QUERY.into(), ELEMENT_INPUT, "element-input-v1-sha256:", |_, _| panic!("replay preflight"), |_, _| panic!("replay dispatch")).await, Err(InvokeError::Forbidden));
+        let decisions: Vec<String> = sqlx::query_scalar("SELECT decision FROM capability_audit WHERE request_id = 'success' ORDER BY rowid").fetch_all(&db).await.unwrap();
         assert_eq!(decisions, ["authorization_check", "grant_allowed", "authorization_check", "dispatch_authorized", "dispatch_succeeded"]);
-        let parameters: Vec<String> = sqlx::query_scalar("SELECT parameters FROM capability_audit").fetch_all(&db).await.unwrap();
-        let digest = wecom_search_query_parameters(POINT, QUERY).unwrap();
-        assert!(parameters.iter().all(|value| value == &digest));
     }
 
-    #[tokio::test]
-    async fn preflight_failure_retains_grant_and_has_only_typed_diagnostic() {
-        let db = database().await;
-        grant(&db).await;
-        assert_eq!(run(&db, "preflight", |_, _| Err(ActivationDiagnostic::PreflightUnavailable), |_, _| panic!("failed preflight dispatch")).await, Err(InvokeError::ActivationPreflight(ActivationDiagnostic::PreflightUnavailable)));
-        assert!(wecom_search_query_any_grant(&db).await.unwrap());
-        let decisions: Vec<String> = sqlx::query_scalar("SELECT decision FROM capability_audit ORDER BY rowid").fetch_all(&db).await.unwrap();
-        assert_eq!(decisions, ["authorization_check", "grant_allowed", "not_dispatched_preflight_unavailable"]);
-    }
-
-    #[tokio::test]
-    async fn revocation_and_atomic_consumption_audit_failure_block_dispatch() {
-        let db = database().await;
-        grant(&db).await;
-        let revoke_db = db.clone();
-        assert_eq!(run(&db, "revoked", move |_, _| {
-            tokio::runtime::Handle::current().block_on(sqlx::query("DELETE FROM local_capability_grants").execute(&revoke_db)).unwrap();
-            Ok(())
-        }, |_, _| panic!("revoked dispatch")).await, Err(InvokeError::Forbidden));
-        grant(&db).await;
-        sqlx::query("CREATE TRIGGER fail_dispatch BEFORE INSERT ON capability_audit WHEN NEW.decision = 'dispatch_authorized' BEGIN SELECT RAISE(ABORT, 'audit failed'); END").execute(&db).await.unwrap();
-        assert_eq!(run(&db, "audit-blocked", |_, _| Ok(()), |_, _| panic!("unaudited dispatch")).await, Err(InvokeError::AuditUnavailable));
-        assert!(wecom_search_query_any_grant(&db).await.unwrap());
-        let consumed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM capability_audit WHERE request_id = 'audit-blocked' AND decision = 'dispatch_authorized'").fetch_one(&db).await.unwrap();
-        assert_eq!(consumed, 0);
-        sqlx::query("DROP TABLE capability_audit").execute(&db).await.unwrap();
-        assert_eq!(run(&db, "initial-audit-blocked", |_, _| panic!("unaudited preflight"), |_, _| panic!("unaudited dispatch")).await, Err(InvokeError::AuditUnavailable));
-        assert!(wecom_search_query_any_grant(&db).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn dispatched_failure_or_post_dispatch_audit_failure_is_unknown_without_retry() {
-        let db = database().await;
-        grant(&db).await;
-        let calls = Arc::new(AtomicUsize::new(0));
-        let dispatch_calls = calls.clone();
-        assert_eq!(run(&db, "native-error", |_, _| Ok(()), move |_, _| {
-            dispatch_calls.fetch_add(1, Ordering::SeqCst);
-            Err(anyhow::anyhow!("native error containing {QUERY}"))
-        }).await, Err(InvokeError::OutcomeUnknown));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(!wecom_search_query_any_grant(&db).await.unwrap());
-        let decisions: Vec<String> = sqlx::query_scalar("SELECT decision FROM capability_audit WHERE request_id = 'native-error' ORDER BY rowid").fetch_all(&db).await.unwrap();
-        assert_eq!(decisions.last().map(String::as_str), Some("dispatch_outcome_unknown"));
-        grant(&db).await;
-        sqlx::query("CREATE TRIGGER fail_result BEFORE INSERT ON capability_audit WHEN NEW.decision = 'dispatch_succeeded' BEGIN SELECT RAISE(ABORT, 'audit failed'); END").execute(&db).await.unwrap();
-        let dispatch_calls = calls.clone();
-        assert_eq!(run(&db, "result-audit-error", |_, _| Ok(()), move |_, _| {
-            dispatch_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }).await, Err(InvokeError::OutcomeUnknown));
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert!(!wecom_search_query_any_grant(&db).await.unwrap());
-        assert_eq!(run(&db, "no-retry", |_, _| panic!("retry preflight"), |_, _| panic!("retry dispatch")).await, Err(InvokeError::Forbidden));
-    }
 }
+

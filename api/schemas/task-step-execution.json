@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://wecom-use.local/schemas/task-step-execution-v2.json",
+  "$id": "https://wecom-use.local/schemas/task-step-execution-v3.json",
   "title": "TaskStepExecution",
   "type": "object",
   "required": ["step_id", "sequence", "attempt", "instruction", "status", "verification", "output", "error"],
@@ -8,7 +8,7 @@
     "step_id": { "type": "string", "minLength": 1 },
     "sequence": { "type": "integer", "minimum": 0 },
     "attempt": { "type": "integer", "minimum": 1 },
-    "instruction": { "$ref": "https://wecom-use.local/schemas/task-instruction-v1.json" },
+    "instruction": { "$ref": "https://wecom-use.local/schemas/task-instruction-v2.json", "description": "Original exact instruction, including sensitive caller-supplied parameters. send_message_by_nickname preserves nickname, ordered typed messages and interval_ms for the authorized caller. Complete responses must not enter ordinary logs/audit." },
     "status": { "$ref": "https://wecom-use.local/schemas/execution-status-v1.json" },
     "verification": {
       "type": "object",
@@ -20,8 +20,97 @@
     },
     "output": {
       "type": ["object", "null"],
-      "description": "capture_app_window returns path and capture_id. detection_app_window_objects returns capture_id, image_size and predictions with original image-pixel coords; it does not automatically add screen coordinates. convert_app_window_coordinates returns capture_id, window_bounds_points [x,y,width,height], screen_coordinate_space macos_global_top_left_points_at_capture and boxes with image_bounds_pixels, screen_bounds_points and screen_center_points. Points are capture-time macOS global top-left logical points, potentially negative, not authorization to click. References expire after 300 seconds; pre-existing screenshots have no capture record. Successful click_app_element returns {\"clicked\":true}; a separately reported verification status of not_performed is not a claim of independent protocol-level verification. Failure after dispatch or inability to establish a state transition is unknown, not a safe retry. Read-only inspect_app_element returns {\"diagnostic_code\":\"matched\"} on a current match; this neither dispatches input nor authorizes a later click. Successful input_app_element returns {\"text_input\":true} after exact AXValue readback; that readback is not independent verification."
+      "description": "window_capture returns path and capture_id. vision_detect returns capture_id, image_size and predictions with original image-pixel coords; it does not automatically add screen coordinates. screenshot_coordinates_convert returns capture_id, window_bounds_points [x,y,width,height], screen_coordinate_space macos_global_top_left_points_at_capture and boxes with image_bounds_pixels, screen_bounds_points and screen_center_points. Points are capture-time macOS global top-left logical points, potentially negative, not authorization to click. References expire after 300 seconds; screenshots without a private capture record cannot be converted. Successful click_focus returns {\"focused\":true} only after a stable target application/window/element/geometry, passive per-process observation of this click's exact correlated mouse-down then mouse-up pair routed to the target PID, and the application's AXFocusedUIElement exactly matching the clicked element with AXFocused true within 500ms; focus is observed, never written through AX, there is no retry or second click, and a separate desktop.element.focus focus-v1-sha256 grant is required. Its local UI evidence leaves verification not_performed and makes no delivery claim. Successful click_button returns {\"clicked\":true} after establishing a stable target application/window/element/geometry and either a real AXFocused/AXSelected false-to-true transition or passive per-process observation of this click's exact correlated mouse-down then mouse-up pair routed to the target PID, matching the unique tag, PID, exact point, left button, zero modifier flags and click count one. Unrelated input, incomplete/reversed pairs and unchanged focus alone are insufficient. An unavailable listen-only tap falls back only to actual AX transition evidence. Observation is bounded and read-only, without retries, extra focus writes or relaxed window/popup/overlay guards. Missing valid evidence, a changed target or failure after dispatch means unknown, not a safe retry. OS routing evidence does not prove application processing or business-semantic effects; separate verification remains not_performed, not independent protocol-level verification or proof of correct message identity. Read-only ax_inspect returns {\"diagnostic_code\":\"matched\"} on a current match; this neither dispatches input nor authorizes a later click. Successful keyboard_text_input (authorized generic AXTextField/AXTextArea replacement) returns {\"text_input\":true} after focus, Command+A and chunked Unicode keyboard down/up input, followed by exact AXValue readback within 2 seconds on the same stable target. Readback is not independent verification, verification is not_performed, and success does not prove that a matching contact exists. Any failure after possible focus/input has unknown outcome and must not be retried. Successful keyboard_key_input returns {\"pressed\":true} only after exactly one preallocated zero-modifier Return key-down/up pair (keycode 36) is observed within 500ms by a passive per-process tap routed in order to the WeCom process; it changes no focus, types no text, never retries or posts a second pair, and missing/incomplete routing or audit failure after posting is unknown. This local routing evidence leaves verification not_performed and does not prove application processing, draft submission, delivery or any business-semantic effect. Successful send_message_by_nickname returns ordered outcomes, completed_count, unknown_index and live-validated cache_hits as defined below. Search/open/draft/send evidence belongs only to internal narrowly parent-delegated helpers, not public standalone output alternatives."
     },
     "error": { "oneOf": [{ "$ref": "https://wecom-use.local/schemas/task-error-v2.json" }, { "type": "null" }] }
+  },
+  "allOf": [{
+    "if": {
+      "required": ["instruction"],
+      "properties": {
+        "instruction": {
+          "required": ["action"],
+          "properties": { "action": { "const": "send_message_by_nickname" } }
+        }
+      }
+    },
+    "then": {
+      "properties": {
+        "output": { "oneOf": [{ "$ref": "#/$defs/sendByNicknameOutput" }, { "type": "null" }] }
+      }
+    }
+  }],
+  "$defs": {
+    "sendByNicknameOutput": {
+      "type": "object",
+      "description": "Ordered local UI evidence only, not delivery/read receipt or independent verification. A stopped workflow retains this output with execution/step unknown and verification not_performed. submitted false is retained when authorization or intent audit blocks Send before native dispatch; submitted null means an admitted send attempt cannot be established; false is not a safe-retry instruction. No automatic resend or continuation after unknown. No nickname or message text is echoed; original instruction remains sensitive.",
+      "required": ["outcome", "outcomes", "completed_count", "unknown_index", "cache_hits", "progress", "message_states"],
+      "properties": {
+        "outcome": { "enum": ["completed", "unknown"] },
+        "progress": {
+          "type": "object", "additionalProperties": false,
+          "required": ["phase", "operation", "message_index", "status", "failure", "contact_diagnostic"],
+          "properties": {
+            "phase": { "enum": ["launch", "center", "measurement", "navigation", "search", "contact", "composer", "message_validation", "draft", "send_guard", "send", "interval", "final_audit", "completed"] },
+            "operation": { "enum": ["process_launch", "window_center", "window_capture", "live_geometry", "cache_read", "live_control_guard", "vision_detect", "screenshot_coordinates_convert", "cache_store", "message_navigation", "search_query", "exact_contact", "empty_draft_write", "exact_draft_guard", "return_and_observe", "inter_message_delay", "parent_audit"] },
+            "message_index": { "type": ["integer", "null"], "minimum": 0, "maximum": 99 },
+            "status": { "enum": ["completed", "stopped"] },
+            "failure": { "enum": [null, "authorization", "audit", "operation", "postcondition"] },
+            "contact_diagnostic": {
+              "description": "Null outside contact failures; populated for contact whole-window capture/readiness, local inference, conversion prechecks and exact_contact failures, retained across subsequent final parent audit failure. Dispatch describes only the contact click, never prior parent side effects. Proven pre-click failures, including readiness timeout, remain not_dispatched; this never implies retryability or changes parent unknown. Read-only readiness waiting is bounded to at most 2 seconds without input replay or full-screen fallback and retains the latest concrete typed reason. Local evidence is not delivery. Unexpected/untyped errors use contact_operation_failed; read-only pre-click operations retain not_dispatched, with unknown reserved for possible contact-click dispatch. No raw OS/AX errors, nickname, text or coordinates.",
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["dispatch", "code"],
+                  "properties": {
+                    "dispatch": { "enum": ["not_dispatched", "dispatched", "unknown"] },
+                    "code": { "enum": ["contact_target_unavailable", "input_monitoring_unavailable", "input_preparation_failed", "contact_target_changed", "window_unavailable", "window_changed", "focus_lost", "opacity_changed", "window_list_unavailable", "search_popup_still_visible", "input_route_unconfirmed", "conversation_header_unconfirmed", "input_monitoring_lost", "contact_operation_failed", "main_window_unavailable", "main_window_not_frontmost", "search_focus_unavailable", "search_geometry_unavailable", "search_anchor_unavailable", "search_query_mismatch", "popup_unavailable", "popup_tree_unavailable", "contact_result_unavailable", "contact_cell_unavailable", "contact_cell_window_mismatch", "contact_cell_geometry_unavailable", "contact_hit_test_unavailable", "contact_hit_mismatch", "contact_point_outside", "contact_capture_unavailable", "contact_capture_changed", "contact_capture_record_unavailable", "contact_result_ambiguous", "contact_result_bot", "contact_section_unavailable"] }
+                  }
+                }
+              ]
+            }
+          },
+          "description": "Terminal diagnostic checkpoint, set before each operation. Capture/vision/conversion retains the enclosing workflow phase. Failure categories are fixed and sanitized, never raw errors. Success uses completed/parent_audit, null index and failure; a final parent audit failure uses final_audit/parent_audit. Does not change execution status or authorize retries."
+        },
+        "message_states": {
+          "type": "array", "minItems": 1, "maxItems": 100,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["index", "state"],
+            "properties": {
+              "index": { "type": "integer", "minimum": 0, "maximum": 99 },
+              "state": { "enum": ["not_started", "preparing", "submission_unknown", "observed"] }
+            }
+          },
+          "description": "One ordered zero-based entry for every requested message, including unattempted messages. not_started means preparation has not begun; preparing means preparation began without submission evidence; submission_unknown means submission may have occurred without observed local completion; observed means local message observation only, never delivery. Evidence-derived states do not permit blind retries."
+        },
+        "outcomes": {
+          "type": "array", "maxItems": 100,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["index", "submitted", "message_observed"],
+            "properties": {
+              "index": { "type": "integer", "minimum": 0, "maximum": 99 },
+              "submitted": { "type": ["boolean", "null"] },
+              "message_observed": { "type": "boolean" }
+            }
+          }
+        },
+        "completed_count": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "unknown_index": { "type": ["integer", "null"], "minimum": 0, "maximum": 99 },
+        "cache_hits": {
+          "type": "object", "additionalProperties": false,
+          "required": ["message_navigation", "search", "composer", "contact_result"],
+          "properties": {
+            "message_navigation": { "type": "boolean" },
+            "search": { "type": "boolean" },
+            "composer": { "type": "boolean" },
+            "contact_result": { "type": "boolean" }
+          },
+          "description": "True only for live-validated reuse of a SQLite candidate, not a database match; false covers miss or invalidation. Contact reuse requires this invocation's fresh ContactCapture, unique exact ordinary contact, current popup ownership and original screenshot binding rechecked before dispatch. All four flags remain present in partial unknown output."
+        }
+      }
+    }
   }
 }

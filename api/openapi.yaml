@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: DeskAgent Local API
-  version: 1.0.0
+  version: 2.0.0
   description: Local-first API contract. Business capabilities are exposed only when the runtime reports an authorized, implemented channel.
 servers:
-  - url: http://127.0.0.1:17890/api/v1
+  - url: http://127.0.0.1:17890/api/v2
     description: Loopback only; remote binding is not part of this contract.
 paths:
   /health:
@@ -43,7 +43,7 @@ paths:
       operationId: listCapabilities
       responses:
         '200':
-          description: Read-only instruction capability catalog. WeCom launch, window centering, app window capture, local window object localization, element activation and controlled header search-query replacement depend on their implemented channel and runtime prerequisites; contact matching, chat, send, and message verification are unavailable. Search-query availability is independent of screenshot/click grants; native prerequisites remain advisory until authorized preflight.
+          description: Read-only catalog of eight system atomic instructions, two perception instructions and only application send_message_by_nickname. Nickname availability requires native prerequisites, its dedicated single-use parent grant and usable authorization/audit storage. Local vision is conditional on actual missing/stale-coordinate localization, including contact candidates; discovery never promises request-specific hits. Search/open/draft/send are internal narrowly parent-delegated helpers, not standalone public capabilities or grants. Native status is advisory and discovery does not inspect sensitive drafts/messages.
           content:
             application/json:
               schema: { $ref: './schemas/capability-catalog.json' }
@@ -53,22 +53,29 @@ paths:
       operationId: routeRpaTask
       security: [{ localToken: [] }]
       description: >-
-        Synchronous terminal execution only. The required string `protocol_version` must be `"1"`.
+        Synchronous terminal execution only. The required string `protocol_version` must be `"2"`.
         Supply a required sole target `app` ID matching `^[a-z][a-z0-9_.-]{0,127}$`
         (1..128 ASCII characters) and either non-empty natural-language `messages` (each non-blank)
         or non-empty exact `instructions`. When instructions are present they are authoritative
         and messages are ignored; empty instructions are rejected. WeCom window centering uses
         the macOS GUI channel and requires an existing window and Accessibility permission; it
-        does not launch or switch applications. `capture_app_window` and natural language
+        does not launch or switch applications. `window_capture` and natural language
         `截取企业微信窗口` capture only the selected WeCom window. Exactly one WeCom process
         The request app is never duplicated in instruction params; both internal TaskInput modes
         require app without a default, and response app preserves the requested target.
         Invalid app syntax returns invalid_request. Syntactically valid unsupported targets return
         capability_unavailable before resolution, authorization or native dispatch, never a WeCom fallback.
         The catalog currently supports only wecom; WeCom natural-language phrases resolve only for wecom.
-        Generic actions launch_app, center_app_window, detection_app_window_objects, click_app_element,
-        inspect_app_element and input_app_element; protocol_version remains "1".
-        Concrete WeCom adapter methods, capability IDs, scopes and grant hashes remain unchanged.
+        Rust TaskInstruction has three direct families: Atomic(AtomicInstruction),
+        Perception(PerceptionInstruction) and Application(ApplicationInstruction). AtomicInstruction
+        directly encapsulates process_launch, window_center, window_capture, ax_inspect, click_button, click_focus, keyboard_text_input and keyboard_key_input.
+        PerceptionInstruction contains vision_detect and screenshot_coordinates_convert. Vision, OCR and screenshot-coordinate conversion are perception, not OS atoms; no executable OCR action is provided.
+        ApplicationInstruction contains only send_message_by_nickname; Message contains only Text.
+        Search/open/draft/send helpers are internal under narrow parent delegation, never standalone actions, grants or discovery entries. Unknown action names fail deserialization and CLI parsing.
+        JSON uses a flat action/params object: no Atomic/Application/Platform/Perception or category wrappers
+        are accepted. protocol_version is the required string "2". No arbitrary process commands, raw mouse/key event actions or additional task routes
+        are exposed. Instruction grouping does not enable unavailable actions or other apps.
+        Each action has its own capability, scope, digest, preflight and single-use authorization contract.
         must be running; the sole Accessibility window or, when there are multiple, its main
         window is selected and must map uniquely to a visible Core Graphics window by PID and
         geometry. Ambiguity fails; no screen rectangle or occluding windows are captured.
@@ -80,7 +87,7 @@ paths:
         restart may be required. Capability discovery never requests permission.
         The sensitive PNG path is in a private `0700` directory under `~/.desk-agent`;
         the unique file has mode `0600` and its contents are not logged.
-        Exact instruction `detection_app_window_objects` takes `params.objects`, an ordered array
+        Exact instruction `vision_detect` takes `params.objects`, an ordered array
         of 1–16 nonblank strings of at most 256 UTF-8 bytes each; natural-language planning
         is unavailable. It captures a fresh window image and sends it, resized and JPEG encoded,
         to the fixed local endpoint `http://127.0.0.1/v1/chat/completions`, model
@@ -92,7 +99,7 @@ paths:
         grants are rechecked before each respective disclosure. Capture returns `capture_id`;
         localization returns `capture_id`, `image_size` and ordered objects whose predictions
         contain `label` and `coords` in original captured-image pixels, without screen coordinates.
-        Standalone exact `convert_app_window_coordinates` accepts a canonical UUID `capture_id`
+        Standalone exact `screenshot_coordinates_convert` accepts a canonical UUID `capture_id`
         and 1–100 finite image-pixel boxes `[x1,y1,x2,y2]`, strictly ordered and inside the image.
         It uses only the private capture record, not an arbitrary path, and performs no capture,
         inference, permission escalation or click. Records expire after 300 seconds; existing
@@ -111,7 +118,8 @@ paths:
         Global top-left logical points may be negative. These are snapshots, not current UI or
         action authorization: matching geometry cannot rule out movement and return, or later
         changes. Predictions are untrusted; independently revalidate before acting.
-        Standalone exact `click_app_element` takes finite `point` [x,y] in global
+        Standalone exact `click_button` takes finite `point` [x,y] in global
+        The button means the physical left mouse button, not an AXButton-only role restriction; AXTextField and AXCell targets retain the same exact expected_role and existing target/authorization checks.
         macOS top-left logical points and nonblank `expected_role` (at most 256 UTF-8 bytes).
         Optional `expected_label` defaults to null: omission/null explicitly selects
         coordinate-plus-role identity; a nonblank string (at most 256 UTF-8 bytes) selects
@@ -141,8 +149,8 @@ paths:
         Coordinate mode does not read titles/names and does not assert Messages, the correct
         message, or any semantic identity. The caller independently reviews the screenshot/current
         UI and explicitly approves the exact point and role; model/application content cannot
-        authorize. The observed nameless Messages AXCell remains ineligible for name mode.
-        This is not evidence of a successful live Messages click or a guaranteed state transition.
+        authorize. A nameless AXCell is ineligible for name mode.
+        Arbitrary elements may not support the required state transition.
         Each coordinate must be exactly representable as f32 (integer points are an example);
         values are not automatically rounded, and callers must not guess pixel-to-point scaling.
         A separate single-use explicit grant binds app `wecom`, capability and scope
@@ -152,69 +160,201 @@ paths:
         `expected_role`, `expected_label`, with f64 formatting (e.g. 1.0). `expected_label`
         is always present, null when omitted/null, e.g.
         `{"point":[100.0,200.0],"expected_role":"AXCell","expected_label":null}`.
-        All old grants, including `activate-v2-sha256:` and `activate-sha256:`, are rejected.
-        Existing semantic-label requests still work with fresh explicit v3 authorization.
+        Grants not using the required activate-v3-sha256 prefix, including `activate-v2-sha256:` and `activate-sha256:`, are rejected.
+        Semantic-label requests require explicit v3 authorization.
         The grant is atomically consumed and audited after preflight, immediately before
         dispatch; capture or coordinate-conversion grants cannot be reused.
-        The adapter requires an actual AXFocused or AXSelected false-to-true transition on
-        the same target after the click; missing/unchanged evidence, dispatch failure or subsequent
-        audit failure means unknown outcome. Never automatically retry a dispatched action.
-        Success returns `{"clicked":true}`; separate verification status remains `not_performed`,
-        without claiming correct message identity.
+        After dispatch the adapter requires a stable target application, window, element and
+        geometry, plus either an actual AXFocused or AXSelected false-to-true transition on
+        that target or passive per-process observation of this click's exact correlated
+        mouse-down then mouse-up pair routed to the target PID. Both events must match the
+        unique correlation tag, target PID, exact point, left button, zero modifier flags
+        and click count one; unrelated input, incomplete pairs or reversed order are insufficient.
+        If the listen-only tap is unavailable, only actual AX transition evidence can suffice;
+        already-focused/selected or unchanged state alone is insufficient.
+        Observation is bounded and read-only, with no retries, extra focus writes or relaxed
+        window/popup/overlay guards. Missing valid evidence, target changes, dispatch failure
+        or subsequent audit failure mean unknown outcome. Never retry a dispatched action.
+        Success returns `{"clicked":true}`; separate verification status remains `not_performed`.
+        OS routing evidence does not prove application processing, business-semantic effects,
+        independent protocol-level verification or correct message identity.
         After authorization, a failed click preflight may include a fixed
         `diagnostic_code` in a `capability_unavailable` TaskError, with phase `validation`,
         outcome `not_dispatched`, and `retryable: false`. It never includes actual role, title,
         label, coordinates, screenshot or raw OS errors and is not a retrospective diagnosis
         or a diagnosis after dispatch. See the TaskError schema and protocol for the catalog.
-        Standalone exact `inspect_app_element` accepts the same parameters and performs
+        Standalone exact `click_focus` is a separate bounded platform atomic operation, currently
+        supported only for WeCom, and must be the sole exact instruction. It dispatches exactly one
+        preallocated physical left-button click, not an AXButton-only role restriction, using the
+        same validated finite f32 point, 1..256-byte nonblank expected_role and optional
+        1..256-byte expected_label, plus the same live preflight selector checks as click_button.
+        It succeeds only when the application's AXFocusedUIElement exactly equals the clicked
+        element with AXFocused true within 500 ms and this click's exact correlated mouse-down
+        then mouse-up pair is observed routed to the target PID; focus is observed, never written
+        through AX, and there is no retry or second click. A separate single-use grant binds
+        capability and scope `desktop.element.focus`, route `macos_gui`, target
+        `main_or_single_app_window`, effect `focus_element` and `focus-v1-sha256:<digest>` over the
+        same ordered parameter serialization; click and input grants cannot authorize it and vice
+        versa. Success returns `{"focused":true}`; verification remains `not_performed` and no
+        delivery or business-semantic effect is established.
+        Standalone exact `ax_inspect` accepts the same parameters and performs
         read-only current preflight checks, without input dispatch or consuming a click
         grant. It requires a separate explicit local grant for capability and scope
         `wecom.element.diagnose`, route `macos_gui`, target `main_or_single_app_window`,
         effect `inspect_element`, and `diagnose-v3-sha256:<digest>`, using the same ordered
         parameter serialization with `expected_label` always present, including null.
-        All old grants, including `diagnose-v2-sha256:` and `diagnose-sha256:`, are rejected;
-        existing semantic-label requests require fresh explicit v3 authorization.
+        Grants not using the required diagnose-v3-sha256 prefix, including `diagnose-v2-sha256:` and `diagnose-sha256:`, are rejected;
+        semantic-label requests require explicit v3 authorization.
         A match returns `{"diagnostic_code":"matched"}` and does not prove message identity;
         a failed check returns a TaskError with a fixed diagnostic code. This is a current
         observation, not proof of a prior failure or authorization for a later click.
-        Standalone exact `input_app_element` accepts only `point: [x,y]` and `text`.
-        CLI syntax is `input_app_element=JSON_OBJECT`; no natural-language planner is used.
-        Coordinates are finite, exactly f32-representable macOS global top-left logical points,
-        not image pixels. Text is sensitive exact field text, 1..256 UTF-8 bytes,
-        nonblank, without CR, LF or Unicode control characters; no trim, rewrite or append.
-        This supports only the current WeCom GUI structural selector, not universal text fields:
-        the point must repeatedly hit the same enabled AXTextField in the same unique frontmost
-        opaque window, entirely within its top 80 logical-point header, with positive width and
-        height at most 60 points. The exact ancestor chain is AXTextField -> AXSplitGroup ->
-        AXSplitGroup -> selected AXWindow, with direct-child membership checked at each level.
-        When other header AXTextFields exist, a direct-child vertical AXSplitter must separate
-        the target's left column from every other header field, and the target must be the only
-        header text field on that side; missing divider or same-side ambiguity fails closed.
-        Relevant direct-child lists over 2048 entries are rejected; the selector does not
-        traverse the whole window tree.
-        No guessed title, identifier, description, subrole or placeholder fallback is used.
-        Accessibility permission is required; screenshots and Screen Recording permission are not.
-        A separate explicit single-use grant binds app `wecom`, capability and scope
-        `wecom.search.query.set`, route `macos_gui`, target `wecom_search_field`, effect
-        `set_search_query`, parameters `search-query-sha256:<digest>`. Digest is lowercase SHA-256
-        of compact UTF-8 serde_json serialization of a struct ordered `point`, then `text`,
-        with f64 normalization, e.g. `{"point":[492.0,203.0],"text":"张三"}`.
-        No screenshot or click grant is reused. Only this digest, never the text or field value,
-        belongs in ordinary audit/log records. Grant/audit storage and independent grant
-        availability are checked; native prerequisites advertised by the catalog are advisory.
-        Preflight runs only after authorization, then grant consumption and intent audit commit
-        atomically with a final grant recheck before dispatch. The adapter uses writable AXFocused
-        and verifies both AXFocused true and the app's exact AXFocusedUIElement before setting
-        AXValue. Focus, window and geometry are revalidated immediately before the write.
-        No mouse/keyboard events, chat-editor input, Enter or send are performed.
-        A bounded read-only 500ms check requires exact AXValue and the same active app/window.
-        Success capability output is only `{"text_input":true}`, without text echo.
-        The shared TaskResponse step instruction still preserves original point/text for the
-        authorized caller and CLI; complete responses contain sensitive input and must not enter
-        ordinary logs/audit records. Verification remains `not_performed`: AX readback is not
-        independent screenshot evidence and does not prove contact matching.
-        Any dispatched failure, including after possible focus/write or result-audit failure,
-        means unknown outcome; stop and never retry. `search_contact` remains unavailable.
+        Standalone platform atomic `keyboard_text_input` accepts required point/text with no unknown fields.
+        It replaces an authorized AXTextField or AXTextArea, without header/contact/business selectors.
+        Runtime supports only wecom. Points are finite exactly f32-representable global logical coordinates;
+        text is exact nonblank 1..256 UTF-8 bytes without CR/LF or Unicode controls.
+        Require readable/writable AXValue, writable AXFocused; explicitly disabled fails, absent AXEnabled is allowed.
+        Repeated live global AX hits must retain the same PID, selected main-or-single frontmost visible opaque
+        window, role and geometry. Any specifically authorized editor including a chat editor may be replaced;
+        Internal contact/empty-draft guards and parent delegation do not authorize this primitive.
+        Separate explicit one-shot capability/scope desktop.element.input uses route macos_gui,
+        target main_or_single_app_window, effect replace_text, element-input-v1-sha256:<digest>.
+        Digest covers compact UTF-8 serde_json struct ordered point then text, with f64 normalization,
+        no action/params wrapper. Search grants cannot authorize this operation; explicit capability approval is required.
+        Authorize before preflight; failed preflight retains the grant. Recheck and atomically consume with intent audit.
+        Preallocate keyboard pairs before effects, focus once through AX, confirm target focus and app focused element,
+        revalidate target/focus/state before Command+A and every zero-modifier Unicode chunk of at most 20 UTF-16
+        units preserving scalars. Require exact stable-target readback within 2 seconds. No mouse, Enter/Return,
+        clipboard, AppleScript, AXValue write, focus reset or retry. No arbitrary public OS-key action is exposed; keyboard_key_input is the only bounded key action.
+        Output is {"text_input":true}; exact response instruction preserves point/text, so full responses are sensitive.
+        Ordinary audits/logs contain only digests. Verification is not_performed; possible-effect or result-audit
+        failure is unknown and must never be automatically retried.
+        Standalone platform atomic `keyboard_key_input` accepts only key `return` with an empty
+        `modifiers` array, e.g. `{"action":"keyboard_key_input","params":{"key":"return","modifiers":[]}}`.
+        It must be the sole exact instruction and rejects unknown fields, other keys, shortcuts,
+        characters and text. It requires Accessibility and Input Monitoring, one WeCom process and a
+        live visible opaque frontmost main-or-sole WeCom window; read-only preflight changes no focus.
+        Dispatch posts exactly one preallocated zero-modifier Return key-down/up pair (keycode 36),
+        without focus change, text, retry or a second pair. Success requires passive per-process
+        observation of that exact correlated pair routed in order within 500 ms; missing/incomplete
+        evidence or audit failure after posting is unknown and never retried. A separate single-use
+        grant binds capability/scope `desktop.keyboard.key_input`, route macos_gui, target
+        main_or_single_app_window, effect key_input and key-input-v1-sha256:<digest> over compact
+        UTF-8 serde_json fields key then modifiers; text-input/click/focus/draft grants cannot
+        authorize it and vice versa. Output is {"pressed":true}; verification remains not_performed
+        with no application-processing, submission or delivery claim.
+        Sole exact WeCom-only `send_message_by_nickname` takes required nickname, messages and interval_ms;
+        unknown fields are rejected through the same shared strict typed serde parser used by CLI
+        `--instruction 'send_message_by_nickname={"nickname":"张三","messages":[{"type":"text","content":"你好"}],"interval_ms":1000}'`.
+        Public kernel::instruction::Message supports only strict type=text objects with required content;
+        outer TaskRequest.messages is Vec<String>, protocol is "2" and the API path is /api/v2.
+        Nickname is 1..256 UTF-8 bytes, nonblank and control-free; ordered messages contain 1..100 entries,
+        each text is 1..256 UTF-8 bytes, nonblank and control-free. Preserve all original text.
+        interval_ms is 0..60000 and (messages.length-1)*interval_ms <=600000; wait only between completed sends.
+        Dedicated explicit single-use parent capability/scope wecom.message.send_by_nickname binds app wecom,
+        route macos_gui, target exact_nickname_conversation, effect send_text_messages and fixed parameters
+        instruction:send_message_by_nickname:v1, independent of all call parameters.
+        Content-bound send-by-nickname-v1-sha256:<digest> values cannot authorize execution; reject them as grants without conversion or automatic regrant.
+        The digest is only the immutable request audit/delegation/revocation identity: lowercase SHA-256 over compact
+        UTF-8 serde struct fields strictly nickname,messages,interval_ms in that order, without action/params wrapper.
+        Atomically check and consume parent grant with durable intent before any launch within its validity period.
+        Before each child recheck the exact immutable current-request digest/lease and app/route/action restrictions,
+        without per-child approval, ambient or minted broad child grants; do not change the request within the task.
+        Always invoke process_launch then window_center and real measurement capture before reading
+        coordinate cache, even if already open/centered. Private SQLite persists one point per row,
+        with global navigation/search/composer points and instruction_content exact-nickname contact candidates.
+        Stable versioned keys bind app, explicit route, control, layout/calibration version, display
+        logical bounds, main-window logical size and actual capture pixels; contact keys add instruction,
+        exact UTF-8 nickname SHA-256 digest, popup dimensions and offset relative to main.
+        Neither message text nor interval affects localization keys; no nickname/message plaintext is cached.
+        Store global logical points relative to main and contact points relative to popup, translate
+        by current anchor origin without proportional scaling or assumed Retina factor.
+        PID/window/popup identities are fresh validation evidence, never durable lookup identities.
+        Live-validate each candidate before reporting a hit; missing/stale points require real
+        screenshot/local vision/coordinate conversion. Contact candidates require unique exact
+        ordinary-contact AX business identity, current popup ownership and original capture binding.
+        Use existing same-user private security storage, unique index and atomic UPSERT, with
+        192 global/1024 content row limits, least-recently-successfully-validated eviction and
+        60-second successful-validation timestamp touch throttling, without a second memory cache.
+        Cache initialization failure must preserve otherwise usable grant/audit storage without deleting/rebuilding the cache. Cache read failure may degrade only to real localization while authorization/audit/live
+        guards remain available; cache write failure never replays input. Grant/audit errors fail closed.
+        Fully warm validated reuse of all four points retains measurement plus fresh contact-result
+        whole-window captures with zero vision/conversion calls. Fully cold successful flow reuses
+        measurement for navigation and performs four whole-window captures/vision/conversion calls.
+        Implementation verification is in progress; these counts are not measured performance or real-send evidence.
+        Warm cache does not remove Screen Recording or live identity checks.
+        After Search, contact reuse and fallback vision use a fresh whole app-window screenshot;
+        the live anchored exact-contact popup is a child window inside that image, never a separate
+        popup image/crop or full-screen fallback. Image size, window_bounds and conversion use the
+        whole main-window frame and actual point/image scale plus the main-window origin.
+        Contact text matching treats explicitly absent/empty AXTitle and AXValue as
+        nonmatching placeholders; nonempty titles remain authoritative and invalid
+        types or failed AX reads still stop. ScreenCaptureKit whole app-window APIs
+        (macOS 14.2+) match exact window ID/PID, keep child windows so the anchored popup is inside
+        the image, disable shadows/cursor, use native point/pixel scale and wait at most 15 seconds
+        for the screenshot; discovery checks API availability read-only, without screen-region/full-screen fallback.
+        Native contact activation requires the original ContactCapture binding and checks initial
+        and final live main/popup identity and geometry against that screenshot before click dispatch,
+        not merely against a currently plausible target.
+        A private binding retains main and popup identity/geometry; capture, loading before local
+        inference, conversion and click recheck the live main window, exact query, anchored popup and
+        unique exact ordinary contact, with private-record matching on load.
+        The contact-result whole-window capture does not overwrite main cache measurement; cached contact candidates are always revalidated against this invocation's original ContactCapture before click dispatch.
+        Read-only readiness waiting is bounded to at most 2 seconds, preserving the latest concrete
+        typed failure on timeout, without input replay or broad desktop grants.
+        Private parent delegation uses whole-window capture/conversion capabilities with purpose
+        contact_result, not a public helper action or capability. Successful cold/warm
+        capture counts are four/two and all of those screenshots are the whole app window.
+        Catalog availability requires native prerequisites and parent grant/storage. Vision is needed
+        only when actual missing/stale-coordinate localization requires it, including contact candidates;
+        unavailable required vision stops execution. Discovery cannot promise hits and model
+        availability alone does not unconditionally gate the composite.
+        Send messages once in original order, stop on any failure or unknown and never resend.
+        Output contains outcome completed|unknown, ordered attempted-send outcomes with zero-based index,
+        submitted boolean|null and message_observed boolean, completed_count, unknown_index integer|null
+        and required cache_hits booleans message_navigation/search/composer/contact_result, true only
+        for live-validated reuse rather than database candidate matches; partial unknown output retains all four.
+        progress reports phase (launch, center, measurement, navigation, search, contact, composer,
+        message_validation, draft, send_guard, send, interval, final_audit, completed), a fixed sanitized
+        operation identifier, nullable zero-based message_index, status completed|stopped, and failure
+        null|authorization|audit|operation|postcondition. Operations are process_launch, window_center,
+        window_capture, live_geometry, cache_read, live_control_guard, vision_detect,
+        screenshot_coordinates_convert, cache_store, message_navigation, search_query, exact_contact,
+        empty_draft_write, exact_draft_guard, return_and_observe, inter_message_delay, parent_audit.
+        Required nullable progress.contact_diagnostic covers contact whole-window capture/readiness,
+        local inference, conversion prechecks and exact_contact failures; it is null outside contact
+        failures and retained across subsequent final parent audit failure. The object contains
+        dispatch not_dispatched|dispatched|unknown and a fixed sanitized code.
+        Codes are contact_target_unavailable, input_monitoring_unavailable, input_preparation_failed,
+        contact_target_changed, window_unavailable, window_changed, focus_lost, opacity_changed,
+        window_list_unavailable, search_popup_still_visible, input_route_unconfirmed,
+        conversation_header_unconfirmed, input_monitoring_lost, contact_operation_failed,
+        main_window_unavailable, main_window_not_frontmost, search_focus_unavailable,
+        search_geometry_unavailable, search_anchor_unavailable, search_query_mismatch,
+        popup_unavailable, popup_tree_unavailable, contact_result_unavailable,
+        contact_cell_unavailable, contact_cell_window_mismatch, contact_cell_geometry_unavailable,
+        contact_hit_test_unavailable, contact_hit_mismatch, contact_point_outside,
+        contact_capture_unavailable, contact_capture_changed, contact_capture_record_unavailable,
+        contact_result_ambiguous, contact_result_bot, contact_section_unavailable.
+        Unexpected/untyped contact errors use contact_operation_failed; unknown requires possible click dispatch. Dispatch describes only
+        the contact click, never earlier parent side effects. Proven pre-click failures including
+        readiness timeout remain not_dispatched, never implying retryability or changing parent unknown.
+        These are local observations, not delivery evidence. Never expose OS/AX errors, nickname, text
+        or coordinates. On timeout retain the latest concrete typed reason. Successful progress includes
+        contact_diagnostic null.
+        Record progress before operations; capture/vision/conversion failures retain their enclosing phase.
+        Success uses completed/parent_audit with null index and failure; parent audit failure uses
+        final_audit/parent_audit. Preserve audit, wrong-reply and postcondition diagnostic evidence,
+        never sensitive raw errors. message_states has one ordered {index,state} entry for every
+        requested message, even when outcomes is empty. States are not_started (no preparation),
+        preparing (preparation without submission evidence), submission_unknown (possible submission
+        without local observation), observed (local observation only). These diagnostic fields do not establish
+        terminal execution status, prove delivery or permit blind retries.
+        A stopped workflow returns HTTP 200/shared IPC TaskResponse with execution/step unknown and partial
+        output retained; independent verification remains not_performed and no delivery/read receipt is claimed.
+        Only hashes and sanitized states enter ordinary audit; original response instruction is sensitive.
+        IPC waits up to 2400 seconds only for this action to cover bounded native/vision work and intervals;
+        HTTP clients should allow this task-specific wait. Timeouts/disconnects never authorize retries.
+        Development validation must not send messages without explicit user authorization.
         Other cataloged instructions may be unavailable. Completion does not imply independent verification. Observation, cancellation, approval,
         and recovery have no defined wire contract and are not exposed here.
       requestBody:
@@ -225,57 +365,73 @@ paths:
             examples:
               exact:
                 value:
-                  protocol_version: "1"
+                  protocol_version: "2"
                   app: wecom
-                  instructions: [{ action: launch_app }]
+                  instructions: [{ action: process_launch }]
               centerWindow:
                 value:
-                  protocol_version: "1"
+                  protocol_version: "2"
                   app: wecom
-                  instructions: [{ action: center_app_window }]
-              captureAppWindow:
+                  instructions: [{ action: window_center }]
+              windowCapture:
                 value:
-                  protocol_version: "1"
+                  protocol_version: "2"
                   app: wecom
-                  instructions: [{ action: capture_app_window }]
-              detectionAppWindowObjects:
+                  instructions: [{ action: window_capture }]
+              visionDetect:
                 value:
-                  protocol_version: "1"
+                  protocol_version: "2"
                   app: wecom
-                  instructions: [{ action: detection_app_window_objects, params: { objects: ["search button", "chat list"] } }]
-              convertAppWindowCoordinates:
+                  instructions: [{ action: vision_detect, params: { objects: ["search button", "chat list"] } }]
+              screenshotCoordinatesConvert:
                 value:
-                  protocol_version: "1"
+                  protocol_version: "2"
                   app: wecom
-                  instructions: [{ action: convert_app_window_coordinates, params: { capture_id: "123e4567-e89b-12d3-a456-426614174000", boxes: [[10.0, 20.0, 30.0, 40.0]] } }]
-              clickAppElement:
+                  instructions: [{ action: screenshot_coordinates_convert, params: { capture_id: "123e4567-e89b-12d3-a456-426614174000", boxes: [[10.0, 20.0, 30.0, 40.0]] } }]
+              clickButton:
                 value:
-                  protocol_version: "1"
+                  protocol_version: "2"
                   app: wecom
-                  instructions: [{ action: click_app_element, params: { point: [100.0, 200.0], expected_role: "AXButton", expected_label: "Search" } }]
-              clickAppElementCoordinateOnly:
+                  instructions: [{ action: click_button, params: { point: [100.0, 200.0], expected_role: "AXButton", expected_label: "Search" } }]
+              clickButtonCoordinateOnly:
                 value:
-                  protocol_version: "1"
+                  protocol_version: "2"
                   app: wecom
-                  instructions: [{ action: click_app_element, params: { point: [100.0, 200.0], expected_role: "AXCell" } }]
-              inspectAppElementCoordinateOnly:
+                  instructions: [{ action: click_button, params: { point: [100.0, 200.0], expected_role: "AXCell" } }]
+              axInspectCoordinateOnly:
                 value:
-                  protocol_version: "1"
+                  protocol_version: "2"
                   app: wecom
-                  instructions: [{ action: inspect_app_element, params: { point: [100.0, 200.0], expected_role: "AXCell", expected_label: null } }]
-              inputAppElement:
+                  instructions: [{ action: ax_inspect, params: { point: [100.0, 200.0], expected_role: "AXCell", expected_label: null } }]
+              keyboardTextInput:
                 value:
-                  protocol_version: "1"
+                  protocol_version: "2"
                   app: wecom
-                  instructions: [{ action: input_app_element, params: { point: [492.0, 203.0], text: "张三" } }]
+                  instructions: [{ action: keyboard_text_input, params: { point: [492.0, 203.0], text: "example" } }]
+              keyboardKeyInput:
+                value:
+                  protocol_version: "2"
+                  app: wecom
+                  instructions: [{ action: keyboard_key_input, params: { key: "return", modifiers: [] } }]
+              sendMessageByNickname:
+                summary: Ordered text workflow with dedicated single-use parent confirmation, fresh contact capture and bounded intervals
+                value:
+                  protocol_version: "2"
+                  app: wecom
+                  instructions:
+                    - action: send_message_by_nickname
+                      params:
+                        nickname: "张三"
+                        messages: [{ type: text, content: "你好" }]
+                        interval_ms: 1000
               natural:
                 value:
-                  protocol_version: "1"
+                  protocol_version: "2"
                   app: wecom
                   messages: ["请打开企业微信"]
       responses:
         '200':
-          description: Terminal task response with ordered steps and separate verification status. Completion does not imply independent verification.
+          description: Terminal shared task response with ordered steps and separate verification status. Completion does not imply independent verification. A stopped send_message_by_nickname workflow returns execution and step status unknown with ordered partial outcomes, completed_count, cache_hits and unknown_index preserved, never an instruction to retry.
           content:
             application/json:
               schema: { $ref: './schemas/rpa-response.json' }

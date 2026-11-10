@@ -1,4 +1,4 @@
-# RPA 操作协议 — v1 草案
+# RPA 操作协议 — v2 草案
 
 **状态：**提议中的规范。本文定义目标协议和标准本地实现要求，不代表任何功能已经实现。只有在实现、公开接口、Schema、能力目录和验证同步迁移后，才能声明符合本规范。示例为协议消息示意，不代表现有部署的实际行为。
 
@@ -20,11 +20,12 @@
 
 ## 3. 版本与编码
 
-协议主版本为 `1`。HTTP 路径以 `/api/v1` 为根；Schema 使用独立、不可变的版本化标识。JSON 使用 UTF-8，对象成员名为字符串；时间戳为带 `Z` 的 RFC 3339 UTC 字符串。二进制证据单独存储，使用经授权的不透明引用表示。标识是不透明字符串，使用 UUIDv7 或其他抗碰撞方案生成；客户端不得从标识推断权限或顺序。
+协议主版本为 `2`。HTTP 路径以 `/api/v2` 为根；Schema 使用独立、不可变的版本化标识。JSON 使用 UTF-8，对象成员名为字符串；时间戳为带 `Z` 的 RFC 3339 UTC 字符串。二进制证据单独存储，使用经授权的不透明引用表示。标识是不透明字符串，使用 UUIDv7 或其他抗碰撞方案生成；客户端不得从标识推断权限或顺序。
+健康检查、系统信息、能力发现和任务提交全部使用此根路径：`GET /api/v2/health`、`GET /api/v2/system/info`、`GET /api/v2/capabilities` 和 `POST /api/v2/rpa`。只有任务入口分发执行。
 
 请求 Schema 拒绝未知字段。因此，不得假定新增请求字段与旧服务端兼容。不兼容的请求、响应含义、枚举或生命周期变化需要新的 API 主版本和迁移文档。主版本内可以新增可选响应字段；客户端必须忽略未知响应对象字段。客户端必须保守处理未知状态、事件和错误码，不得假设其表示成功而执行或重试。服务端不得改变已有字段含义或复用标识。能力分别声明其 Schema 版本。
 
-有请求体时，每个请求在请求体中携带 `protocol_version: "1"`。HTTP 发现与读取操作使用路径版本。不支持的版本必须在任何副作用前失败。IPC 使用相同语义的请求与响应对象，其帧格式见第 11 节。CLI 和桌面端构造相同的任务请求，经 Runtime 分发，并呈现相同语义的结果和错误信息。
+有请求体时，每个请求在请求体中携带 `protocol_version: "2"`。HTTP 发现与读取操作使用路径版本。不支持的版本必须在任何副作用前失败。IPC 使用相同语义的请求与响应对象，其帧格式见第 11 节。CLI 和桌面端构造相同的任务请求，经 Runtime 分发，并呈现相同语义的结果和错误信息。
 
 ## 4. 标识与共享数据规则
 
@@ -34,20 +35,20 @@
 
 ## 5. 任务请求与指令模型
 
-`POST /api/v1/rpa` 是唯一通用 HTTP 任务执行入口。所有外部调用的任务执行、取消、审批与恢复操作必须使用此入口、共享任务契约及 Runtime 能力调用器；其新增请求和响应形式需要协调修订契约，本文不作既定定义。现有只读能力目录仍是单独的必需发现入口。任务提交请求体为共享 `TaskRequest`：
+`POST /api/v2/rpa` 是唯一通用 HTTP 任务执行入口。所有外部调用的任务执行、取消、审批与恢复操作必须使用此入口、共享任务契约及 Runtime 能力调用器；其新增请求和响应形式需要协调修订契约，本文不作既定定义。现有只读能力目录仍是单独的必需发现入口。任务提交请求体为共享 `TaskRequest`：
 
 ```json
 {
-  "protocol_version": "1",
+  "protocol_version": "2",
   "app": "wecom",
   "messages": ["Open WeCom"],
-  "instructions": [{"action": "launch_app"}]
+  "instructions": [{"action": "process_launch"}]
 }
 ```
 
 | 字段 | 规则 |
 |---|---|
-| `protocol_version` | 必填字符串 `"1"`。 |
+| `protocol_version` | 必填字符串 `"2"`。 |
 | `app` | 必填且唯一的目标应用 ID，1..128 个 ASCII 字符，匹配 `^[a-z][a-z0-9_.-]{0,127}$`；不得用作模型或提供方标识。 |
 | `messages` | 有序非空白字符串数组；缺少 `instructions` 时必填。存在指令时可为空，且不用于规划。 |
 | `instructions` | 可选非空类型化业务指令数组。存在时选择精确模式，缺失时选择自然语言模式。`null` 和空数组无效。 |
@@ -56,21 +57,29 @@
 
 `TaskRequest.app` 是唯一目标来源，指令 `params` 不得重复携带 app。内部 `TaskInput` 的 `NaturalLanguage { app, messages }` 和 `ExactInstruction { app, steps }` 均必须携带 `app: String`，反序列化不得隐式或默认使用企业微信。`TaskResponse.app` 保留请求目标，不固定为 `wecom`。app 语法无效返回 `invalid_request`；语法有效但不支持的应用可通过精确输入校验，但 Runtime 在能力解析、授权或原生分发前返回 `capability_unavailable`，不得回退到企业微信。当前目录仍只发布 `wecom`；企业微信自然语言短语也仅在该目标下解析。
 
-通用动作名为 `launch_app`、`center_app_window`、`detection_app_window_objects`、`click_app_element`、`inspect_app_element`、`input_app_element`；`protocol_version` 仍为 `"1"`。通用任务名不改变具体企业微信适配器方法、稳定能力 ID、scope、授权目标或参数摘要。
+共享 Rust 契约为 `kernel::instruction::TaskInstruction`，直接包含 `Atomic(AtomicInstruction)`、`Perception(PerceptionInstruction)` 和 `Application(ApplicationInstruction)` 三个类别。`AtomicInstruction` 直接封装进程、窗口、AX、鼠标、键盘系统域；感知独立承载视觉、OCR 和截图坐标转换，当前没有可执行 OCR 指令。JSON 使用扁平 `action`/`params` 对象，不接受类别包装字段；`protocol_version` 是必填字符串 `"2"`。不公开任意进程命令、原始鼠标/按键事件、新任务路由或其他应用支持。
 
-精确指令 `{"action":"center_app_window"}` 不带参数，对应能力 `wecom.window.center`。其 macOS GUI 通道将已有企业微信窗口移至窗口所在屏幕的完整屏幕中心，不改变窗口大小；不得静默启动企业微信或切换应用。该操作需要 macOS 辅助功能权限和可操作的已有窗口；平台不支持或前置条件不满足时，能力不可用或返回错误。完成本身不构成独立验证，错误不得报告为已验证。此声明不代表完整协议符合性或已在真实硬件上验证。
+| 指令类别 | 现有动作 |
+|---|---|
+| 系统原子指令（`AtomicInstruction`） | `process_launch`、`window_center`、`window_capture`、`ax_inspect`、`click_button`、`click_focus`、`keyboard_text_input`、`keyboard_key_input` |
+| 独立感知指令（`PerceptionInstruction`），不属于 OS 原子指令 | `vision_detect`、`screenshot_coordinates_convert` |
+| 应用指令 | 仅 `send_message_by_nickname` |
+
+唯一公开应用动作是 send_message_by_nickname。搜索字段输入、精确联系人打开、空草稿写入及精确草稿发送仅为父授权窄范围委托的内部实现助手，不提供独立动作、授权、路由或目录条目。未知动作名称在请求反序列化及 CLI 解析边界拒绝。
+
+精确指令 `{"action":"window_center"}` 不带参数，对应能力 `wecom.window.center`。其 macOS GUI 通道将已有企业微信窗口移至窗口所在屏幕的完整屏幕中心，不改变窗口大小；不得静默启动企业微信或切换应用。该操作需要 macOS 辅助功能权限和可操作的已有窗口；平台不支持或前置条件不满足时，能力不可用或返回错误。完成本身不构成独立验证，错误不得报告为已验证。此声明不代表完整协议符合性或已在真实硬件上验证。
 
 GUI 通道要求恰有一个运行中的企业微信实例；只有一个辅助功能窗口时选择该窗口，存在多个窗口时选择辅助功能主窗口，无法确定主窗口时返回错误。按窗口与活动显示器的最大重叠面积选屏；面积相同或没有重叠显示器时返回错误。设置位置后适配器回读辅助功能位置和大小，只有两者分别与目标位置及原大小相差不超过 1 点才返回成功；回读失败或不符时返回错误，但窗口可能已经移动。该回读不是独立的截图验证。
 
-无参数精确指令 `{"action":"capture_app_window"}` 和自然语言消息 `截取企业微信窗口` 通过 Runtime 的 `macos_gui` 通道对应能力及必需范围 `desktop.window.capture`。本地明确授权必须绑定应用 `wecom`、目标 `main_or_single_app_window`、效果 `capture` 和参数 `none:v1`；先前的屏幕或窗口授权不能用于此操作。需要 macOS 屏幕录制及辅助功能权限、可用的授权和审计存储，以及恰好一个运行中的企业微信进程。只有一个辅助功能窗口时选该窗口，多个时选主窗口；必须按 PID 和几何信息唯一匹配可见 Core Graphics 窗口，存在歧义则失败。只捕获该窗口，不截取屏幕矩形或遮挡它的其他窗口。返回 `~/.desk-agent` 下私有 `0700` 目录中唯一 `0600` PNG 文件的路径；不得记录截图内容。完成不代表已独立验证。
+无参数精确指令 `{"action":"window_capture"}` 和自然语言消息 `截取企业微信窗口` 通过 Runtime 的 `macos_gui` 通道对应能力及必需范围 `desktop.window.capture`。本地明确授权必须绑定应用 `wecom`、目标 `main_or_single_app_window`、效果 `capture` 和参数 `none:v1`；先前的屏幕或窗口授权不能用于此操作。需要 macOS 屏幕录制及辅助功能权限、可用的授权和审计存储，以及恰好一个运行中的企业微信进程。只有一个辅助功能窗口时选该窗口，多个时选主窗口；必须按 PID 和几何信息唯一匹配可见 Core Graphics 窗口，存在歧义则失败。只捕获该窗口及其自身子窗口，不截取屏幕矩形或遮挡它的其他窗口。返回 `~/.desk-agent` 下私有 `0700` 目录中唯一 `0600` PNG 文件的路径；不得记录截图内容。完成不代表已独立验证。
 
 已获本地明确授权的截图请求在缺少屏幕录制权限时可以调用 macOS 权限请求接口。是否显示弹窗由操作系统决定；必须由用户授予权限，且可能需要重启 Runtime。能力发现保持只读，不得请求操作系统权限或弹窗。
 
-精确指令 `{"action":"detection_app_window_objects","params":{"objects":["搜索按钮","会话列表"]}}` 接受 1–16 个有序非空白字符串，每项最多 256 个 UTF-8 字节；不支持该指令的自然语言规划。操作先截取新的目标窗口图像，再按对象顺序逐项向固定本地端点 `http://127.0.0.1/v1/chat/completions`、模型 `wevisone-vl-4b` 发送敏感图像，`wevisone_task` 为 `referring`；不会静默向远程服务披露。除截图授权外，还需另一项本地明确授权：应用 `wecom`、能力及范围 `vision.window.locate`、通道 `local_vision`、目标 `main_or_single_app_window`、效果 `local_inference`、参数 `objects-sha256:<digest>`。摘要是精确有序对象数组的 `serde_json` 紧凑 UTF-8 序列化的 SHA-256 小写十六进制值。Runtime 在每次截图和每次披露前重新检查相应授权。
+精确指令 `{"action":"vision_detect","params":{"objects":["搜索按钮","会话列表"]}}` 接受 1–16 个有序非空白字符串，每项最多 256 个 UTF-8 字节；不支持该指令的自然语言规划。操作先截取新的目标窗口图像，再按对象顺序逐项向固定本地端点 `http://127.0.0.1/v1/chat/completions`、模型 `wevisone-vl-4b` 发送敏感图像，`wevisone_task` 为 `referring`；不会静默向远程服务披露。除截图授权外，还需另一项本地明确授权：应用 `wecom`、能力及范围 `vision.window.locate`、通道 `local_vision`、目标 `main_or_single_app_window`、效果 `local_inference`、参数 `objects-sha256:<digest>`。摘要是精确有序对象数组的 `serde_json` 紧凑 UTF-8 序列化的 SHA-256 小写十六进制值。Runtime 在每次截图和每次披露前重新检查相应授权。
 
 定位输出包含 `capture_id`、`image_size: [width,height]` 和按查询顺序的 `objects: [{query, predictions: [{label, coords: [x1,y1,x2,y2]}]}]`；`coords` 保持原始截图像素，不自动添加屏幕坐标。输出还包含 `capture_path`、`captured_at_unix_ms`、`target` 和 `coordinate_space`。本地推理前图像缩放并编码为 JPEG，返回的框换算回原图像像素；小目标可能因此丢失。
 
-截图也返回 `capture_id`。独立精确指令 `{"action":"convert_app_window_coordinates","params":{"capture_id":"123e4567-e89b-12d3-a456-426614174000","boxes":[[10.0,20.0,30.0,40.0]]}}` 接受 1–100 个有限的原图像像素框 `[x1,y1,x2,y2]`，须位于图片范围内且左上严格小于右下。ID 为规范小写 UUID，只能解析对应私有截图记录，不能传入任意路径。记录 300 秒后过期；旧截图没有记录，无法转换。目标窗口、显示器或几何发生变化时拒绝执行；转换不会截图、调用模型、请求屏幕权限或点击。CLI 可用 `--instruction 'convert_app_window_coordinates={"capture_id":"123e4567-e89b-12d3-a456-426614174000","boxes":[[10.0,20.0,30.0,40.0]]}'`。
+截图也返回 `capture_id`。独立精确指令 `{"action":"screenshot_coordinates_convert","params":{"capture_id":"123e4567-e89b-12d3-a456-426614174000","boxes":[[10.0,20.0,30.0,40.0]]}}` 接受 1–100 个有限的原图像像素框 `[x1,y1,x2,y2]`，须位于图片范围内且左上严格小于右下。ID 为规范小写 UUID，只能解析对应私有截图记录，不能传入任意路径。记录 300 秒后过期；没有私有截图记录的截图无法转换。目标窗口、显示器或几何发生变化时拒绝执行；转换不会截图、调用模型、请求屏幕权限或点击。CLI 可用 `--instruction 'screenshot_coordinates_convert={"capture_id":"123e4567-e89b-12d3-a456-426614174000","boxes":[[10.0,20.0,30.0,40.0]]}'`。
 
 转换需单独明确授权：应用 `wecom`，能力及范围 `desktop.window.coordinates.convert`，通道 `macos_gui`，目标 `main_or_single_app_window`，效果 `read_geometry`，参数 `conversion-sha256:<digest>`。摘要是字段依次为 `capture_id`、`boxes` 的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写十六进制值；数字使用 serde_json 的 f64 表示（如 `1.0`）。Runtime 在派发前重新检查授权。
 
@@ -78,15 +87,16 @@ GUI 通道要求恰有一个运行中的企业微信实例；只有一个辅助�
 
 这些坐标只是快照，不代表当前界面或行动授权。几何未变也不能排除移动后移回或检查后变化。预测和标签不可信；点击前必须独立重新验证目标和当前界面。
 
-独立精确指令 `{"action":"click_app_element","params":{"point":[100.0,200.0],"expected_role":"AXButton","expected_label":"Search"}}` 是受限的企业微信业务操作，不是任意桌面输入，也不支持自然语言规划。CLI 使用 `--instruction 'click_app_element={"point":[100.0,200.0],"expected_role":"AXButton","expected_label":"Search"}'`。调用方须给出 macOS 全局左上原点逻辑点表示的有限坐标 `[x,y]` 和准确的非空白 `expected_role`（不超过 256 UTF-8 字节）。角色须精确匹配实际 AXRole，不会把 `AXCell` 当成 `AXButton`。`expected_label` 可选：不超过 256 UTF-8 字节的非空白字符串选择语义名称验证；省略或 `null` 明确选择坐标加角色身份模式。空串或纯空白字符串无效，不会切换模式。
+独立精确指令 `{"action":"click_button","params":{"point":[100.0,200.0],"expected_role":"AXButton","expected_label":"Search"}}` 是当前仅支持企业微信的受限系统原子操作，不是任意桌面输入，也不支持自然语言规划。CLI 使用 `--instruction 'click_button={"point":[100.0,200.0],"expected_role":"AXButton","expected_label":"Search"}'`。调用方须给出 macOS 全局左上原点逻辑点表示的有限坐标 `[x,y]` 和准确的非空白 `expected_role`（不超过 256 UTF-8 字节）。角色须精确匹配实际 AXRole，不会把 `AXCell` 当成 `AXButton`。`expected_label` 可选：不超过 256 UTF-8 字节的非空白字符串选择语义名称验证；省略或 `null` 明确选择坐标加角色身份模式。空串或纯空白字符串无效，不会切换模式。
+`click_button` 中的 button 是物理鼠标左键，并非仅允许 `AXButton` 角色。`AXTextField`、`AXCell` 等目标继续按调用方精确指定的 `expected_role` 及既有身份、窗口和授权条件检查。
 名称模式按确定顺序匹配 `expected_label`：优先使用元素自身非空 `AXTitle`；只有自身标题缺失或为空时，才通过标准 `AXTitleUIElement` 关系读取同一 PID、同一窗口内的 `AXStaticText` 标题元素，优先其非空 `AXTitle`，否则使用其非空字符串 `AXValue`。自身非空标题与预期不符时立即失败，不改用关系标签。不得使用 `AXDescription`、任意子节点或后代、未读数、图标描述或猜测的标签。角色或名称不可用时拒绝执行；名称检查失败绝不静默退回坐标模式。
-仅坐标模式示例：`{"action":"click_app_element","params":{"point":[100.0,200.0],"expected_role":"AXCell"}}`；CLI 使用 `--instruction 'click_app_element={"point":[100.0,200.0],"expected_role":"AXCell"}'`，显式 `"expected_label":null` 等价。此模式不读取标题或名称，也不声称该点是“消息”、正确的消息或任何语义目标。调用方须独立审阅截图/当前界面并明确批准精确点位和角色；模型预测和应用内容不可信，不能授权。已观察到的无名称“消息” `AXCell` 仍不符合名称模式；坐标模式只授权已批准的点位与角色，不推断消息身份，也不证明已完成真实“消息”点击。不能保证任意元素都支持所需状态变化。点击本身不截图、不需要截图记录或屏幕录制权限。
+仅坐标模式示例：`{"action":"click_button","params":{"point":[100.0,200.0],"expected_role":"AXCell"}}`；CLI 使用 `--instruction 'click_button={"point":[100.0,200.0],"expected_role":"AXCell"}'`，显式 `"expected_label":null` 等价。此模式不读取标题或名称，也不声称该点是“消息”、正确的消息或任何语义目标。调用方须独立审阅截图/当前界面并明确批准精确点位和角色；模型预测和应用内容不可信，不能授权。无名称 `AXCell` 不符合名称模式；坐标模式只授权已批准的点位与角色，不推断消息身份。不能保证任意元素都支持所需状态变化。点击本身不截图、不需要截图记录或屏幕录制权限。
 每个坐标必须能精确表示为 f32（例如整数点）；操作不会自动舍入坐标，也不会猜测像素到点的比例。
 
 `macos_gui` 通道要求本机 macOS 辅助功能权限。两种模式均要求坐标位于实时唯一选定、可见、不透明且处于前台的企业微信窗口内。系统全局 AX 命中测试须精确确认目标 PID、窗口和角色；名称模式另核对可访问名称。派发原生 CGEvent 鼠标按下/抬起之前，立即重复确认同一元素与未变化的窗口几何。其他 Core Graphics 窗口的外接矩形覆盖该点本身不作为遮挡证据，也不按进程名豁免；命中其他进程或窗口仍以 `point_obscured` 或 `target_element_mismatch` 拒绝。不提供可用辅助功能命中信息的覆盖层可能无法被发现，因此这不是对所有可视遮挡的保证。无法完成所需检查时拒绝执行，不静默启动或激活应用、不点击目标应用外部、不发送文本，也不绕过派发前验证。
-必须有单独的本地明确一次性授权，绑定应用 `wecom`、能力及范围 `wecom.element.activate`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `activate_element` 和包含精确坐标、预期角色及身份模式/名称的参数 `activate-v3-sha256:<digest>`。摘要是字段依次为 `point`、`expected_role`、`expected_label` 的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写十六进制值；最后一个字段始终保留，省略或 `null` 标签均写为 `null`。例如坐标模式规范参数为 `{"point":[100.0,200.0],"expected_role":"AXCell","expected_label":null}`。坐标数字使用 serde_json f64 格式（如 `1.0`），参数不得改写。`v3` 前缀绑定明确身份模式策略；所有旧授权（包括 `activate-v2-sha256:` 和 `activate-sha256:`）均拒绝。原有语义名称请求仍可使用，但须重新明确授予 v3 授权。预检后、派发前立即原子消费授权并审计；截图或坐标转换授权不能复用。
+必须有单独的本地明确一次性授权，绑定应用 `wecom`、能力及范围 `wecom.element.activate`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `activate_element` 和包含精确坐标、预期角色及身份模式/名称的参数 `activate-v3-sha256:<digest>`。摘要是字段依次为 `point`、`expected_role`、`expected_label` 的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写十六进制值；最后一个字段始终保留，省略或 `null` 标签均写为 `null`。例如坐标模式规范参数为 `{"point":[100.0,200.0],"expected_role":"AXCell","expected_label":null}`。坐标数字使用 serde_json f64 格式（如 `1.0`），参数不得改写。`v3` 前缀绑定明确身份模式策略；不使用此前缀的授权（包括 `activate-v2-sha256:` 和 `activate-sha256:`）均拒绝。语义名称请求须明确授予 v3 授权。预检后、派发前立即原子消费授权并审计；截图或坐标转换授权不能复用。
 
-授权后，激活预检失败的 `TaskError` 可包含可选固定 `diagnostic_code`；错误仍为 `capability_unavailable`，阶段为 `validation`、结果为 `not_dispatched`、`retryable: false`，并保留请求 ID。代码只描述本次派发前失败：
+授权后，激活预检失败的 `TaskError` 可包含可选固定 `diagnostic_code`；错误为 `capability_unavailable`，阶段为 `validation`、结果为 `not_dispatched`、`retryable: false`，并保留请求 ID。代码只描述本次派发前失败：
 
 - `accessibility_unavailable`：辅助功能访问不可用。
 - `target_window_unavailable`：无法获取目标窗口。
@@ -105,36 +115,104 @@ GUI 通道要求恰有一个运行中的企业微信实例；只有一个辅助�
 
 代码不泄露实际角色、标题、标签、坐标、截图或原始系统错误。不确定时使用适当的不可用代码，不推断遮挡；固定代码也可记录在审计决策中。诊断不能绕过授权或验证，不追溯诊断旧记录，也不用于派发后的失败。
 
-独立精确指令 `inspect_app_element` 使用与 `click_app_element` 相同的 `point`、`expected_role` 和可选 `expected_label`，按明确选定的身份模式执行相同的只读当前预检，不派发输入，也不消费点击授权。CLI 名称模式示例为 `--instruction 'inspect_app_element={"point":[100.0,200.0],"expected_role":"AXButton","expected_label":"Search"}'`，坐标模式为 `--instruction 'inspect_app_element={"point":[100.0,200.0],"expected_role":"AXCell"}'`（显式 `null` 等价）。它需要独立本地明确授权，绑定应用 `wecom`、能力及范围 `wecom.element.diagnose`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `inspect_element` 和 `diagnose-v3-sha256:<digest>`；摘要采用与点击相同的有序参数序列化，始终包含 `expected_label`（含 `null`）。匹配时返回 `{"diagnostic_code":"matched"}`，检查失败时返回带固定诊断代码的 TaskError。这只是当前观察，不证明消息身份，也不是后续点击的授权。
+独立精确指令 `ax_inspect` 使用与 `click_button` 相同的 `point`、`expected_role` 和可选 `expected_label`，按明确选定的身份模式执行相同的只读当前预检，不派发输入，也不消费点击授权。CLI 名称模式示例为 `--instruction 'ax_inspect={"point":[100.0,200.0],"expected_role":"AXButton","expected_label":"Search"}'`，坐标模式为 `--instruction 'ax_inspect={"point":[100.0,200.0],"expected_role":"AXCell"}'`（显式 `null` 等价）。它需要独立本地明确授权，绑定应用 `wecom`、能力及范围 `wecom.element.diagnose`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `inspect_element` 和 `diagnose-v3-sha256:<digest>`；摘要采用与点击相同的有序参数序列化，始终包含 `expected_label`（含 `null`）。匹配时返回 `{"diagnostic_code":"matched"}`，检查失败时返回带固定诊断代码的 TaskError。这只是当前观察，不证明消息身份，也不是后续点击的授权。
 
-派发后适配器须在同一目标上观察到真实 `AXFocused` 或 `AXSelected` 从 false 变为 true；原本已聚焦/选中或状态不变不足以证明成功。证据缺失或不变、派发失败、效果发生后审计失败均为结果未知，不能报告已验证；派发后绝不自动重试。成功返回 `{"clicked":true}`；独立的协议验证状态仍为 `not_performed`，不声称协议层独立验证或识别了正确消息。
+派发后适配器须确认目标应用、窗口、元素及几何保持稳定，并满足以下任一证据：同一目标的真实 `AXFocused` 或 `AXSelected` 从 false 变为 true；或通过目标进程的只读被动事件 tap，按顺序观察到本次点击精确关联的鼠标按下、抬起事件对已路由至目标 PID。两个事件须匹配本次唯一关联标记、目标 PID、精确坐标、左键、零修饰标志及单击计数。其他输入、不完整或乱序的事件对均不能充当证据。tap 不可用时仅可回退到真实 AX 状态转换；原本已聚焦/选中或状态不变本身仍不足以证明成功。观察有界且只读，不得重试、额外写入焦点或放宽窗口/弹出层/覆盖层检查。
 
-### 受控的企业微信搜索字段文本输入
+缺少有效证据、目标改变、派发失败、效果发生后审计失败均为结果未知，不能报告已验证；派发后绝不自动重试。成功返回 `{"clicked":true}`；独立的协议验证状态仍为 `not_performed`。操作系统路由证据不证明应用已处理点击、业务语义效果、协议层独立验证或识别了正确消息。
 
-独立精确指令 `{"action":"input_app_element","params":{"point":[492.0,203.0],"text":"张三"}}` 对应 `TaskInstruction::InputAppElement { point, text }`；CLI 使用 `--instruction 'input_app_element={"point":[492.0,203.0],"text":"张三"}'`。仅支持应用 `wecom`，不由自然语言解析器或规划器生成。两字段均必填，拒绝未知字段。`point` 是两个有限且能精确表示为 f32 的 macOS 全局左上原点逻辑屏幕点，不是截图像素。敏感的 `text` 必须为 1..256 UTF-8 字节、非空白且不含 CR、LF 或 Unicode 控制字符；不得裁剪、归一化或改写原文。
+### 点击获取键盘焦点
 
-选择器仅适用于当前支持的企业微信 GUI，不代表通用应用或任意文本框支持。给定点必须重复命中实时唯一选定、可见、不透明、前台企业微信窗口中的同一启用 `AXTextField`。文本框正尺寸边界须完全位于该窗口顶部 80 逻辑点的页头带内，宽度大于零，高度不超过 60 点；严格祖先链为 `AXTextField → AXSplitGroup → AXSplitGroup → 选定 AXWindow`，并核对各级直接子节点归属。页头带内存在其他 `AXTextField` 时，必须由直接子级的垂直 `AXSplitter` 把目标与其余页头字段分到不同列，且目标须是该侧唯一的页头文本框；缺失分割线或同侧歧义均拒绝。相关直接子节点列表超过 2048 项时拒绝，不遍历整个窗口树。当前搜索框没有可用标题、标识符、子角色、描述或占位文字，不得伪造标签或使用替代猜测。系统全局 AX 命中测试确认应用与窗口归属，并重复确认同一元素和几何；不能只按其他窗口的外接矩形判定遮挡。需要 macOS 辅助功能权限，不依赖截图或屏幕录制权限。
+独立精确指令 `{"action":"click_focus","params":{"point":[100.0,200.0],"expected_role":"AXTextField","expected_label":null}}` 是当前仅支持企业微信的独立受限系统原子操作，且必须是精确请求中的唯一指令。CLI 使用 `--instruction 'click_focus={"point":[100.0,200.0],"expected_role":"AXTextField","expected_label":null}'`。它复用与 `click_button` 相同的实时预检选择器：坐标须位于实时唯一选定、可见、不透明且处于前台的企业微信主窗口或唯一窗口内，系统全局 AX 命中须匹配精确的目标 PID、窗口和 `expected_role`，名称模式另核对可访问名称。校验边界与 `click_button` 相同：macOS 全局左上原点逻辑点表示的有限坐标 `[x,y]` 须能精确表示为 f32，`expected_role` 为 1..256 UTF-8 字节的非空白字符串，`expected_label` 可选且为 1..256 UTF-8 字节的非空白字符串，省略或 `null` 明确选择坐标加角色身份模式；拒绝未知字段。button 指物理鼠标左键，`AXButton` 并非唯一允许角色，`AXTextField`、`AXCell` 等仍按调用方精确 `expected_role` 和既有目标检查处理。能力目录另行给出建议性前置条件，其中包含点位处的可编辑实时文本字段；该声明不放宽精确角色检查。
 
-需要独立明确的单次授权，绑定应用 `wecom`、能力及范围 `wecom.search.query.set`、通道 `macos_gui`、目标 `wecom_search_field`、效果 `set_search_query` 和参数 `search-query-sha256:<digest>`。摘要为结构体按 **`point` 然后 `text`** 字段顺序的紧凑 UTF-8 `serde_json` 序列化的小写 SHA-256，精确保留 text；f64 数字遵循 serde_json 归一化。上述示例的规范字节为 `{"point":[492.0,203.0],"text":"张三"}`。不得散列 action 外壳、改字段顺序、增加空白或换成整数数字表示。以下仅使用非敏感示例：
+它只派发一对预先分配的鼠标左键按下/抬起事件，不重试、不派发第二次点击，也不为 `keyboard_text_input` 提供鼠标回退。成功须同时满足：目标应用、窗口、元素及几何保持稳定；目标进程的只读被动事件 tap 按顺序观察到本次点击精确关联的鼠标按下、抬起事件对已路由至目标 PID；并且在 500 毫秒内应用 `AXFocusedUIElement` 与点击元素完全一致且该元素报告 `AXFocused == true`。焦点只被观察，适配器绝不通过 AX 写入焦点，状态不变不足以证明成功。缺少路由或焦点证据、目标改变、派发失败或后续审计失败均为结果未知，绝不自动重试。
 
-```sh
-digest=$(printf '%s' '{"point":[492.0,203.0],"text":"张三"}' | shasum -a 256 | cut -d ' ' -f 1)
-sqlite3 "$HOME/.desk-agent/security.sqlite3" "INSERT OR IGNORE INTO local_capability_grants VALUES ('wecom','wecom.search.query.set','macos_gui','wecom_search_field','set_search_query','search-query-sha256:$digest');"
-desk-agent-cli rpa --app wecom --instruction 'input_app_element={"point":[492.0,203.0],"text":"张三"}'
+它需要独立的本地明确一次性授权，绑定应用 `wecom`、能力及范围 `desktop.element.focus`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `focus_element` 和参数 `focus-v1-sha256:<digest>`。摘要为字段依次为 `point`、`expected_role`、`expected_label` 的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写十六进制值，最后一个字段始终保留，省略或 `null` 标签均写为 `null`；坐标模式规范参数为 `{"point":[100.0,200.0],"expected_role":"AXCell","expected_label":null}`。点击授权（`wecom.element.activate`）和输入授权（`desktop.element.input`）不能授权此动作，此授权也不能授权它们或其他能力。预检后、派发前立即原子消费授权并审计。派发前的预检失败使用与 `click_button` 相同的固定 `diagnostic_code`，阶段为 `validation`、结果为 `not_dispatched`、`retryable: false`。
+
+成功仅返回 `{"focused":true}`。这只是本机 UI 证据：独立协议验证状态仍为 `not_performed`，不构成投递、回执、后续输入已被应用处理或任何业务语义效果的声明。
+
+### 授权输入框整值替换
+
+`keyboard_text_input` 属于 `TaskInstruction::Atomic(AtomicInstruction::KeyboardTextInput { point, text })`，不是搜索或联系人业务操作。扁平精确指令为 `{"action":"keyboard_text_input","params":{"point":[492.0,203.0],"text":"example"}}`；CLI 使用 `--instruction 'keyboard_text_input={"point":[492.0,203.0],"text":"example"}'`。两字段必填，拒绝未知字段。point 为有限且精确可表示为 f32 的 macOS 全局左上原点逻辑屏幕坐标。text 为原样非空白的 1..256 UTF-8 字节，不含 CR/LF 或 Unicode 控制字符，不裁剪、不规范化。Runtime 目前仍只支持 `wecom`，不宣称支持其他应用。
+
+点位须重复命中当前唯一选定、前台、可见、不透明主窗口或唯一应用窗口内同一可写 `AXTextField` 或 `AXTextArea`。要求 `AXValue` 可读且可写、`AXFocused` 可写；明确禁用时拒绝，缺失 `AXEnabled` 时允许。须保持 PID、窗口、角色、几何及实时系统全局 AX 命中一致。原子操作不带页头、分割线、联系人或空草稿业务选择器。任何专门授权的编辑器（包括已有内容的聊天编辑器）均可能被整值替换；不继承内部草稿助手的业务保护或权限，也不发送。
+
+独立明确的单次授权绑定应用 `wecom`、能力及 scope `desktop.element.input`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `replace_text` 和 `element-input-v1-sha256:<digest>`。摘要为紧凑 UTF-8 `serde_json` 结构体按 **`point` 然后 `text`** 序列化的小写 SHA-256，遵循 f64 归一化并保留原文，不含 action/params 外壳。必须显式批准该能力，搜索、草稿、点击及截图授权均不可复用。先授权后只读预检，失败预检不消费授权；派发前复查授权并原子消费及提交意图审计。普通日志/审计只记摘要，不记录原文、旧值或回读。
+
+副作用前预分配所有键盘按下/抬起事件对，仅请求一次 AX 焦点并确认目标 `AXFocused` 与应用 `AXFocusedUIElement`。全选前及每个 Unicode 分块前复查目标、焦点和状态。先以仅 Command 修饰的 Command+A 全选，再以零修饰 Unicode 分块输入，每块最多 20 UTF-16 单元且不拆分 Unicode 标量。最长 2 秒内在同一稳定目标精确回读。禁止鼠标、Enter/Return、剪贴板、AppleScript、AXValue 写入、重置焦点及重试输入。output 仅为 `{"text_input":true}`；响应步骤精确保留原始 point/text，完整响应属于敏感数据。独立验证为 `not_performed`，AX 回读不是独立验证；可能发生副作用或结果审计失败后的结果为 `unknown`，不得自动重试。不公开任意 OS 按键动作。
+
+```json
+{"protocol_version":"2","app":"wecom","instructions":[{"action":"keyboard_text_input","params":{"point":[492.0,203.0],"text":"example"}}]}
 ```
 
-真实文本不得留在 shell 历史、命令跟踪或普通日志中。普通审计仅记录摘要，不记录文本、旧字段值或回读文本。截图、点击及其他授权不能复用。能力目录独立检查本授权及授权/审计存储；原生前置条件仅为建议性状态，不代表通用选择器支持。必须先授权再执行原生预检；预检失败不消费授权。Runtime 在分发前复查授权，并以同一事务消费授权、提交意图审计。
+### 单次受限 Return 按键
 
-适配器要求 `AXFocused` 与 `AXValue` 可写，通过辅助功能设置焦点，并确认目标 `AXFocused == true` 且应用的 `AXFocusedUIElement` 正是该元素。写入前立即再次确认焦点、应用/窗口归属及未变化的几何，然后用 `AXUIElementSetAttributeValue` 替换整个 `AXValue`。不得追加、产生鼠标/键盘事件、输入聊天编辑器、按 Enter 或发送任何内容。写入后最多 500ms 的有界只读检查要求 AXValue 精确相等且仍是同一活动应用/窗口；不重试写入。
+独立精确指令 `{"action":"keyboard_key_input","params":{"key":"return","modifiers":[]}}` 是系统原子按键操作，必须是精确请求中的唯一指令，仅支持 `wecom`；CLI 使用 `--instruction 'keyboard_key_input={"key":"return","modifiers":[]}'`。两字段必填且拒绝未知字段：`key` 必须为 `return`，`modifiers` 必须为空数组。不接受其他按键、快捷键、字符、文本、指针事件或应用业务选择器。
 
-成功使用共享 HTTP/IPC `TaskResponse`；能力 `output` 仅为 `{"text_input":true}`，不回显文本。共享精确指令契约仍在步骤的原始 `instruction` 中保留 `point` 和 `text`，授权调用方及 CLI 可看到自己提交的参数；因此完整响应含敏感输入，不得写入普通日志或审计。独立验证仍为 `not_performed`，AX 回读不是独立截图验证。任何已分发失败，包括可能聚焦/写入后的失败或结果审计失败，均为 `unknown`，必须停止，不得自动重试。分发前失败可使用已有脱敏类型化诊断码，不泄露文本或字段内容。该操作仅设置搜索字段文本；`SearchContact` / `search_contact` 仍不可用，不声称已匹配联系人或打开聊天。
+必须使用独立的本地明确一次性授权，绑定应用 `wecom`、能力及范围 `desktop.keyboard.key_input`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `key_input` 和参数 `key-input-v1-sha256:<digest>`。摘要为字段依次为 `key`、`modifiers` 的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写十六进制值；唯一合法参数的规范字节为 `{"key":"return","modifiers":[]}`。文本输入（`desktop.element.input`）、点击（`wecom.element.activate`）、焦点（`desktop.element.focus`）和草稿授权不能授权此动作，此授权也不能授权它们。预检后、派发前立即原子消费授权并审计。
 
+需要 macOS 辅助功能与输入监控权限、恰好一个运行中的企业微信进程，以及可见、不透明、前台的主窗口或唯一窗口。只读预检确认被动按键路由证据可用，不改变焦点、不派发输入。派发恰好一对预先分配的零修饰 Return 按下/抬起事件（键码 36），不改变焦点、不输入文本、不重试、不派发第二次按键。成功须由目标进程的被动事件 tap 在 500 毫秒内按顺序观察到本次精确关联的按下、抬起事件对已路由至企业微信进程；派发后任何失败（含路由证据缺失或不完整或审计失败）均为结果未知，绝不自动重试。成功仅返回 `{"pressed":true}`；独立协议验证状态仍为 `not_performed`，该本机路由证据不证明应用已处理、草稿已提交、消息已投递或任何业务语义效果。
+
+### SQLite 坐标缓存目标契约
+
+**状态：实现已切换，自动行为验证及隔离存储跨进程烟测通过。** 坐标缓存使用 SQLite 持久化，一坐标一记录，区分全局缓存和指令内容缓存。按精确昵称缓存联系人候选坐标；复用前必须实时验证唯一精确联系人、当前弹层归属及本次截图绑定。缓存不得替代授权、审计或目标验证。联系人 GUI 热路径及真实发送未实测；下列成功路径次数是契约要求，不是原生性能测量、独立验证或真实发送证据。
+
+1. **存储与作用域。** 使用 SQLite 持久化，一条记录只保存一个坐标。`global` 保存消息导航、搜索框及输入框坐标；`instruction_content` 保存按指令及精确昵称隔离的联系人结果候选坐标。全局仅表示与指令内容无关，不表示跨应用、通道或布局通用。不保留旧静态缓存或第二份内存坐标缓存。
+2. **查询键与隐私。** 唯一键包含应用、显式通道、作用域、控件、布局／校准版本及几何配置；内容记录额外包含指令类型及原始 UTF-8 昵称的带版本 SHA-256 摘要。不裁剪、改写或归一化昵称，消息及间隔不参与定位键。昵称摘要仍是敏感派生数据，不是匿名化、授权或现有整请求审计／委托摘要。缓存不保存昵称及消息明文。复用现有数据库基础设施并使用同用户私有存储，不降低授权／审计存储保护。
+3. **几何与坐标。** 几何配置包含显示器逻辑边界、主窗口逻辑尺寸及实际截图像素尺寸；联系人记录另绑定弹层尺寸及其相对主窗口的偏移。配置使用带明确版本的规范编码。全局控件存主窗口相对逻辑点，联系人候选存弹层相对逻辑点；用当前参照原点平移，不按尺寸等比缩放、不假定 Retina 倍率。PID、窗口编号及弹层身份属于本次实时验证证据，不作为持久查询身份。应用重启只能保留候选记录，不能保留旧身份或授权。
+4. **顺序与校准。** 每次仍先启动、居中并真实截取主窗口，再查询缓存；不新增自动窗口缩放能力。每个坐标只在对应 UI 阶段查询；尺寸／配置不匹配时按当前配置重新定位，不借用其他配置记录。操作期间几何或身份改变使该操作证据失效，停止分发。
+5. **命中语义。** 数据库匹配只是候选。转换为当前有效屏幕坐标后，必须通过实时 AX 角色、祖先层级、窗口、焦点和适用业务校验，才报告有效命中。输入框保留精确会话及空草稿保护。缺失或陈旧坐标须走真实截图→本地视觉→坐标转换→实时验证后再替换。目标歧义或无法验证时停止，不能靠缓存消除歧义。
+6. **联系人复用。** 精确搜索及有界只读就绪检查后，仍取得本次主窗口整窗联系人截图，包含锚定子弹层并建立新的私有 `ContactCapture`。按当前配置查询该精确昵称的候选点；复用前确认当前精确查询、唯一精确普通联系人、弹层归属及候选点命中，并核对本次原始截图绑定。点击分发前再次核对原始绑定。候选点陈旧时走新联系人视觉及转换；身份歧义或截图证据改变则停止。重复昵称必须查询四类适用缓存，修改消息或间隔不阻止定位缓存查询，但不得放宽不可变请求委托。
+7. **截图预算。** 全热且验证通过的目标路径保留测量及新联系人结果两次截图，可跳过四次视觉／转换。全冷成功路径复用测量截图定位导航，共四次截图与四次视觉／转换。这是目标成功路径次数，不是已观察性能或零截图承诺；仍需录屏权限。
+8. **持久化与上限。** 在现有同用户私有安全数据库中使用唯一索引及原子 UPSERT 替换验证后的记录；短事务不得跨 AX、截图或模型调用。初始全局上限 192 条、内容上限 1,024 条；分别淘汰最久未成功验证的记录，每条记录成功验证时间的 touch 更新按 60 秒限频。过期策略不能证明坐标准确。损坏或不兼容记录不可使用。权限、焦点、就绪等环境失败本身不证明坐标陈旧。
+9. **故障隔离。** 缓存初始化失败（包括重启时缓存表不兼容）不得禁用原本可用的授权／审计库，也不得自动删除／重建旧表。缓存读取失败仅在授权、审计及验证仍可用时允许走真实无缓存定位，并提供脱敏诊断；缓存写失败不重放输入、不撤销已经建立的实时证据。授权／审计失败仍失败关闭。已派发操作失败或结果未知立即停止，不能为填充缓存而重试副作用。
+10. **接口。** 协议 `"2"`、API v2、`TaskRequest`、指令参数和父授权不变，不增加缓存执行动作或端点。Rust 行为、能力前置条件、HTTP/IPC/CLI 验证、OpenAPI 及响应 Schema 使用同一契约。保留 `cache_hits.message_navigation`、`search`、`composer` 并增加必需的 `contact_result`；包括部分 `unknown` 输出在内，仅实时验证后的复用才为 true。能力发现不得预测本次命中；实际回退定位需要视觉但模型不可用时停止，目录描述条件性要求，不承诺命中，也不因模型不可用而无条件禁用组合。
+11. **验收。** 证明隔离 SQLite 关闭重开持久化、重复昵称四点复用、昵称隔离、修改消息后复用、新进程／窗口身份重启、参照原点平移、布局不兼容拒绝、联系人陈旧／重排／歧义安全、存储故障、撤销及部分输出保留。分别统计候选匹配与有效命中，记录脱敏阶段耗时及实际截图／模型次数。非发送原生实测和注入工作流测试不是实发证据；真实发送须另有明确授权，独立验证保持 `not_performed`。
+
+### 按企业微信精确昵称发送有序文本
+
+`ApplicationInstruction::SendMessageByNickname { nickname: String, messages: Vec<Message>, interval_ms: u64 }` 必须是 `wecom` 请求中唯一的精确指令，不支持自然语言规划。CLI 使用 `--instruction 'send_message_by_nickname={"nickname":"张三","messages":[{"type":"text","content":"你好"}],"interval_ms":1000}'`；HTTP/IPC 使用 `{"action":"send_message_by_nickname","params":{...}}`。三个参数均必填，统一使用共享严格 serde 契约拒绝未知字段。
+
+公开 `kernel::instruction::Message` 是以 `type` 为标签的枚举，仅接受 `{"type":"text","content":"..."}`。外层 `TaskRequest.messages` 为 `Vec<String>`，协议为 `"2"`，API 路径为 `/api/v2`。昵称必须满足 `valid_open_chat`：1..256 UTF-8 字节、非空白、无 Unicode 控制字符。消息列表为 1..100 条，每条满足 `valid_app_input([0,0], content)`：1..256 UTF-8 字节、非空白、无 Unicode 控制字符。所有原文和顺序保持不变，不裁剪、改写或 Unicode 归一化。`interval_ms` 为 0..60000，且 `(messages.len() - 1) * interval_ms <= 600000`；仅在上一条发送完成后到下一条发送前等待，不在首条前/末条后等待。
+
+此高风险外部消息传输使用独立明确单次父授权，绑定应用 `wecom`、能力及范围 `wecom.message.send_by_nickname`、通道 `macos_gui`、目标 `exact_nickname_conversation`、效果 `send_text_messages`，参数固定为 `instruction:send_message_by_nickname:v1`。授权最小单位是应用指令，与昵称、消息内容/顺序、间隔等全部调用参数无关。内容绑定 `send-by-nickname-v1-sha256:<digest>` 值不得授权执行，作为授权时必须拒绝，不得转换或自动重新授权。该摘要仅为不可变请求的审计、委托及撤销标识：小写 SHA-256 覆盖字段严格按 **`nickname`、`messages`、`interval_ms`** 顺序的紧凑 UTF-8 serde 结构体 JSON，不含 action/params 外壳，保留全部精确原文及消息顺序。必须在**任何启动前**原子检查并消费父授权、记录持久意图，且授权须在有效期内。每个子操作前复查当前不可变请求的精确摘要、租约及应用/通道/动作限制；指令级授权不允许任务内改变请求，不逐子步骤审批，不能借用环境子授权、宽泛桌面授权或临时铸造宽泛授权；子审计只记录父关联、摘要和脱敏状态。
+
+每次必须先调用 `process_launch`，再调用 `window_center`，再真实截取主窗口以测量实际图像尺寸及实时身份／几何，之后才能读取坐标缓存；已经启动/居中也不能跳过。SQLite 导航、搜索、联系人及输入框候选遵循上述作用域、稳定几何及相对坐标规则；持久查询键不含 PID／窗口身份。命中使用前实时核对；失效/缺失必须走真实截图→本地视觉→截图坐标转换，不猜测或复用陈旧点位。精确昵称联系人缓存仍须本次新的 `ContactCapture`、唯一普通联系人及精确会话 AX 业务身份，并在分发前核对原始截图绑定；发送保留精确编辑器、焦点、目标、事件路由及新增消息观察检查。
+
+四类候选全部实时验证命中的全热成功路径仍有两次真实整窗截图：测量截图与新联系人结果截图，视觉及坐标转换均为零次。全冷成功路径将测量截图复用于消息导航推理，再截取搜索、联系人和输入框，共四次整窗截图与四次视觉/坐标转换调用。坐标缓存不能免除录屏权限、新联系人截图或实时验证。上述次数正在验证，不构成性能结论。
+
+搜索完成后，联系人复用及回退视觉均使用本次新的企业微信主窗口整窗截图，锚定搜索弹窗作为子窗口包含在图像内；不得单独截取弹窗、裁剪或复用测量图像。截图尺寸、`window_bounds` 与坐标转换均以主窗口为坐标框：按整窗实际逻辑点/图像尺寸缩放像素并加主窗口全局逻辑点原点，不假设 Retina 倍率。私有 `ContactCapture` 绑定主窗口身份/几何及截图时弹窗身份/几何。截图、视觉调用前的加载、转换、缓存候选验证及联系人点击必须实时复查主窗口、精确搜索原文、锚定弹窗与唯一精确普通联系人；加载还须匹配私有记录。联系人截图不得覆盖用于缓存检查的主窗口测量。只读就绪等待固定最多 2 秒，超时保留最近具体类型化原因；不得重放输入、扩大桌面授权或回退全屏截图。此路径仅经父授权内部委托，使用整窗截图/转换能力及窄载荷 `purpose: contact_result`，不提供公开助手动作或能力。成功路径全冷/全热为四/两次截图，均为整窗截图。
+
+原生联系人点击必须持有原始 `ContactCapture` 绑定，在初始及最终实时目标检查中均对照原始截图的主窗口与弹窗身份/几何，且最终检查须在派发点击前完成；仅验证当前目标看似有效不足以允许点击。
+
+联系人文本比较必须将明确缺失或空的 AXTitle 与 AXValue 视为不匹配的占位节点，不得作为联系人、分组或 BOT 身份证据；非空标题保持优先，类型错误和 AX 读取失败必须停止。实现使用 ScreenCaptureKit 桌面独立窗口过滤器截取选定的企业微信主窗口，精确匹配窗口 ID 与所属 PID，保留子窗口使锚定搜索弹窗进入整窗图像，关闭阴影与光标，采用实际点像素比例；不得使用 screencapture 的父窗口重定向、弹窗专属图像、屏幕区域裁剪或全屏回退。目录只读检查所需 API（macOS 14.2+），异步截图最多等待 15 秒。
+
+能力目录只读且仅供参考，要求原生前置条件、可用授权/审计存储及有效父授权，不得声称知道当前缓存命中。任一缺失或陈旧候选的回退定位（包括联系人候选）需要本地视觉；实际所需模型不可用即停止，但不因模型可用性无条件禁用组合。目录既不授予宽泛子范围，也不证明实时目标。
+
+文本按原顺序各发送一次；任何失败、未知效果、范围变化或审计失败均立即停止，不重发、不继续。部分输出必须保留有序逐条 `submitted`/`message_observed`、完成数量、缓存命中与适用时的未知消息索引。HTTP/IPC 以共享 `TaskResponse` 的执行/步骤 `unknown` 保留这些输出，不能以不含前序完成消息的裸传输错误替代。本地 UI 证据不是服务器确认、送达/已读或独立验证，`verification` 保持 `not_performed`。完整响应仅向授权调用方保留敏感原始指令，禁止普通日志/审计记录。
+
+在同一 Runtime 进程内，委托原生分发与撤销共享串行边界。撤销确认须等待已经获准的原生操作结束；撤销持久提交后，不得再开始后续子操作。消息间隔等待不持有此边界，因此允许在等待期间提交撤销。调用方或传输 future 被丢弃不会释放 GUI 执行锁，也不会取消已接纳任务：Runtime 自有任务继续承担执行与审计责任。这不是跨进程或多机协调保证。
+
+输出形状为 `{"outcome":"completed","outcomes":[{"index":0,"submitted":true,"message_observed":true}],"completed_count":1,"unknown_index":null,"cache_hits":{"message_navigation":false,"search":false,"composer":false,"contact_result":false},"progress":{"phase":"completed","operation":"parent_audit","message_index":null,"status":"completed","failure":null,"contact_diagnostic":null},"message_states":[{"index":0,"state":"observed"}]}`。`index` 从零开始，`outcomes` 按顺序仅包含已尝试发送的条目；无法确定是否提交时 `submitted` 可为 `null`，`message_observed` 是布尔值，`completed_count` 仅计已完整观察到的消息，消息处理开始前 `unknown_index` 保持 null。四个必需缓存标志仅在实时验证后的复用时为 true，不把数据库候选匹配计为命中；false 包含未命中/失效。停止时输出 `outcome` 改为 `"unknown"`，保留全部已有证据，不表示未观察到的提交可以安全重试。
+
+`progress` 表示终止时的诊断检查点，成功示例为 `{"phase":"completed","operation":"parent_audit","message_index":null,"status":"completed","failure":null,"contact_diagnostic":null}`。`phase` 枚举为 `launch`、`center`、`measurement`、`navigation`、`search`、`contact`、`composer`、`message_validation`、`draft`、`send_guard`、`send`、`interval`、`final_audit`、`completed`。`operation` 仅使用固定脱敏标识：`process_launch`、`window_center`、`window_capture`、`live_geometry`、`cache_read`、`live_control_guard`、`vision_detect`、`screenshot_coordinates_convert`、`cache_store`、`message_navigation`、`search_query`、`exact_contact`、`empty_draft_write`、`exact_draft_guard`、`return_and_observe`、`inter_message_delay`、`parent_audit`。每个操作前记录检查点；截图、视觉或坐标转换失败仍保留所属业务阶段。`message_index` 从零开始，不在消息处理期间则为 null；`status` 仅为 `completed` 或 `stopped`；`failure` 为 null 或固定诊断类别 `authorization`、`audit`、`operation`、`postcondition`，不得包含敏感原始错误。父审计失败报告 `final_audit`/`parent_audit`，不能报告成功完成；审计错误、错误回复及后置条件失败须保留具体诊断证据，不能压缩成无法解释的 unknown。
+
+
+`progress.contact_diagnostic` 是必需的可空字段，覆盖联系人整窗截图/就绪、本地推理、转换预检查及 `exact_contact` 失败，其他失败为 null；已有诊断在后续父审计失败时仍保留。例如 `{"dispatch":"not_dispatched","code":"contact_target_unavailable"}`。`dispatch` 为 `not_dispatched|dispatched|unknown`，仅描述联系人点击，不代表此前父任务 GUI 没有副作用。已证明点击前失败（包括就绪超时）保持 `not_dispatched`，不改变父任务 `unknown` 或表示可重试。固定代码完整枚举见 [执行 Schema](../api/schemas/task-step-execution.json)。原生细粒度代码包括 `main_window_unavailable`、`main_window_not_frontmost`、`search_focus_unavailable`、`search_geometry_unavailable`、`search_anchor_unavailable`、`search_query_mismatch`、`popup_unavailable`、`popup_tree_unavailable`、`contact_result_unavailable`、`contact_cell_unavailable`、`contact_cell_window_mismatch`、`contact_cell_geometry_unavailable`、`contact_hit_test_unavailable`、`contact_hit_mismatch`、`contact_point_outside`、`contact_capture_unavailable`、`contact_capture_changed`、`contact_capture_record_unavailable`。非预期/无类型错误使用 `contact_operation_failed`，只读点击前操作保留 `not_dispatched`，仅无法排除点击已分发时使用 `unknown`；超时保留最近具体类型化原因。诊断不含原始 OS/AX 错误、昵称、文本或坐标；本地证据不证明送达。
+
+原生 Send 前的授权或意图审计阻断必须保留 `submitted: false`；只有已获准开始但缺少完成证据时才使用 `null`。这些逐操作事实不改变父任务 `unknown`，不允许重试。
+
+其他固定联系人预检查代码为 `contact_result_ambiguous`（多个精确结果）、`contact_result_bot`（非普通联系人的机器人结果）、`contact_section_unavailable`（无法确认普通联系人分组）。
+
+`message_states` 按顺序覆盖**全部请求消息**，即使 `outcomes` 为空也保留每条 `{"index":0,"state":"observed"}`。`state` 依据证据取值：`not_started`（尚未开始准备）、`preparing`（已开始准备但无提交证据）、`submission_unknown`（可能已提交但未观察到本地完成）、`observed`（仅本地消息观察）。这些诊断字段不确立执行/步骤状态，不证明送达，也不允许盲目重试、重发或继续。
+
+IPC 仅对此动作等待最多 2400 秒，以覆盖有界间隔及原生/视觉工作，不改无关动作期限、不增加重试；HTTP 调用方同样应允许有界任务完成。超时/断连不取消在途发送，不能据此重放。开发验证未经明确用户授权不得发送消息；应使用安全搜索/控件烟测及可注入工作流后端覆盖真实编排与失败转换，不能声称已真实发送。
 
 执行前，Runtime 必须依次进行规范化、解析、Schema 校验、范围和风险授权、适用确认、显式路由选择、通过能力调用器分发、验证、审计并返回标准结果。路由改变时必须重新执行适用的策略和审批检查。授权与审批必须绑定应用、能力、目标、副作用、路由和相关参数摘要。Runtime 必须在分发前重新检查过期与撤销状态。
 
 ## 6. 能力发现
 
-`GET /api/v1/capabilities` 返回 `{ "protocol_version": "1", "capabilities": [...] }`。每项包含 `capability_id`、`instruction_action`、`app`、`schema_version`、`input_schema_ref`、`available`、`required_scopes`、`channels`、`risk`、`confirmation`、`verification`、`prerequisites` 和 `unavailable_reason`（仅可用时为 null）。`channels` 标识显式的 GUI、官方 API 或浏览器路由；风险、确认和验证描述必须反映实际策略与通道支持。可用性必须反映可执行的 Runtime 行为和前置条件，不能仅依据已声明的指令或枚举。发现操作只读，不得分发任务。
+`GET /api/v2/capabilities` 返回 `{ "protocol_version": "2", "capabilities": [...] }`。每项包含 `capability_id`、`instruction_action`、`app`、`schema_version`、`input_schema_ref`、`available`、`required_scopes`、`channels`、`risk`、`confirmation`、`verification`、`prerequisites` 和 `unavailable_reason`（仅可用时为 null）。`channels` 标识显式的 GUI、官方 API 或浏览器路由；风险、确认和验证描述必须反映实际策略与通道支持。可用性必须反映可执行的 Runtime 行为和前置条件，不能仅依据已声明的指令或枚举。发现操作只读，不得分发任务。
 
 运行中的尝试必须固定能力版本及参数 Schema。如果分发前能力、路由、授权或审批发生变化，Runtime 必须重新校验；原决策不再覆盖操作时必须停止或请求新审批。目录必须标识不支持或不可用的能力，不得将未来能力声称为可执行。
 
@@ -148,7 +226,7 @@ desk-agent-cli rpa --app wecom --instruction 'input_app_element={"point":[492.0,
 
 ```json
 {
-  "protocol_version": "1",
+  "protocol_version": "2",
   "app": "wecom",
   "execution": {
     "request_id": "01900000-0000-7000-8000-000000000001",
@@ -157,7 +235,7 @@ desk-agent-cli rpa --app wecom --instruction 'input_app_element={"point":[492.0,
     "trace_id": "01900000-0000-7000-8000-000000000004",
     "mode": "exact_instruction",
     "status": "completed",
-    "steps": [{"step_id": "01900000-0000-7000-8000-000000000005", "sequence": 0, "attempt": 1, "instruction": {"action": "launch_app"}, "status": "completed", "verification": {"status": "not_performed", "evidence_ref": null}, "output": {}, "error": null}]
+    "steps": [{"step_id": "01900000-0000-7000-8000-000000000005", "sequence": 0, "attempt": 1, "instruction": {"action": "process_launch"}, "status": "completed", "verification": {"status": "not_performed", "evidence_ref": null}, "output": {}, "error": null}]
   }
 }
 ```
@@ -170,15 +248,15 @@ desk-agent-cli rpa --app wecom --instruction 'input_app_element={"point":[492.0,
 
 HTTP 将格式错误映射为 400，未认证为 401，禁止访问为 403，资源不存在为 404，冲突为 409，歧义或语义输入无效为 422，限流为 429，能力不可用为 503，意外失败为 500。已接受任务的外部结果未知时，以任务状态表示，不得伪造已知失败。分发后的传输错误不能证明取消或失败；客户端重试前必须核对。除非服务端已确定能力特定的重复安全性、当前策略和剩余重试预算，否则错误的 `retryable` 必须为 false。
 
-取消请求通过 `POST /api/v1/rpa` 和共享任务契约提交，并不保证中断。已分发操作可能在请求后完成。只有不存在结果未决的在途副作用时，任务才可标记为 `cancelled`；否则为 `unknown`。客户端期限限制等待，不一定限制执行。服务端期限和审批到期以服务端时间为准；本地超时应使用单调经过时间。时钟偏差本身不得授权分发或恢复。
+取消请求通过 `POST /api/v2/rpa` 和共享任务契约提交，并不保证中断。已分发操作可能在请求后完成。只有不存在结果未决的在途副作用时，任务才可标记为 `cancelled`；否则为 `unknown`。客户端期限限制等待，不一定限制执行。服务端期限和审批到期以服务端时间为准；本地超时应使用单调经过时间。时钟偏差本身不得授权分发或恢复。
 
 ## 9. 幂等、审批与恢复
 
 客户端可在创建任务时提供 `Idempotency-Key`。服务端以认证主体和操作为键的作用域，保存规范化请求摘要与结果；不同摘要复用同一键时拒绝并返回 `idempotency_conflict`。相同重试返回已有操作和新的请求 ID。键在公布的保留期内必须有效；到期后客户端不得假设重复安全。这只对已接受的协议请求去重，不能对任意外部 GUI 效果去重。
 
-审批是通过 `POST /api/v1/rpa` 和共享任务契约进行的独立授权交互，携带审批引用和决策（`approve` 或 `deny`）；确切请求形式需要协调修订契约。服务端必须验证审批方身份、绑定的操作与参数、范围、过期、撤销和单次使用状态。拒绝或过期不得触发自动批准或重试。
+审批是通过 `POST /api/v2/rpa` 和共享任务契约进行的独立授权交互，携带审批引用和决策（`approve` 或 `deny`）；确切请求形式需要协调修订契约。服务端必须验证审批方身份、绑定的操作与参数、范围、过期、撤销和单次使用状态。拒绝或过期不得触发自动批准或重试。
 
-Durable 部署可声明支持恢复。恢复使用 `POST /api/v1/rpa` 和共享任务契约；协调修订时必须定义动作（`reconcile`、`resume`、`retry`、`rollback` 或 `rollback_then_retry`）、预期版本、幂等键及对应动作所需的检查点或步骤引用。恢复是关联原任务的新授权操作。版本过期、所有权丢失或键冲突必须在分发前失败。未知尝试必须用独立证据核对；仅有确认不证明没有副作用。重试需要已知无副作用的失败，或覆盖前次尝试的能力特定幂等保证，同时需要新的策略检查和有限预算。恢复继续执行时不得重新运行已完成且已验证的步骤。补偿需要已注册、获授权的能力，本身也是副作用；失败或未知时必须停止，不能假设消息可以撤回。`rollback_then_retry` 必须先成功完成并验证补偿。
+Durable 部署可声明支持恢复。恢复使用 `POST /api/v2/rpa` 和共享任务契约；协调修订时必须定义动作（`reconcile`、`resume`、`retry`、`rollback` 或 `rollback_then_retry`）、预期版本、幂等键及对应动作所需的检查点或步骤引用。恢复是关联原任务的新授权操作。版本过期、所有权丢失或键冲突必须在分发前失败。未知尝试必须用独立证据核对；仅有确认不证明没有副作用。重试需要已知无副作用的失败，或覆盖前次尝试的能力特定幂等保证，同时需要新的策略检查和有限预算。恢复继续执行时不得重新运行已完成且已验证的步骤。补偿需要已注册、获授权的能力，本身也是副作用；失败或未知时必须停止，不能假设消息可以撤回。`rollback_then_retry` 必须先成功完成并验证补偿。
 
 ## 10. 事件、审计与证据
 

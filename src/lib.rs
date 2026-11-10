@@ -5,5 +5,6 @@ pub mod infrastructure;
 pub mod interfaces;
 pub mod kernel;
 pub mod observability;
+pub mod platforms;
 pub mod providers;
 pub mod runtime;

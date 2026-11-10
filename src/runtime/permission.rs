@@ -3,7 +3,7 @@ pub struct PermissionError {
     pub missing_scope: String,
 }
 
-/// Enforces deny-by-default scope checks. Local credentials are not inferred yet.
+/// Enforces deny-by-default checks using only explicitly supplied scopes.
 pub fn require_scope(granted: &[String], required: &str) -> Result<(), PermissionError> {
     if granted
         .iter()

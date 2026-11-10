@@ -37,3 +37,6 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "process", "io-util", "fs", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.5.1"

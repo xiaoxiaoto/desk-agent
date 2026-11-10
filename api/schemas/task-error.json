@@ -16,7 +16,7 @@
     "diagnostic_code": {
       "type": "string",
       "enum": ["accessibility_unavailable", "target_window_unavailable", "coordinate_precision_unsupported", "point_outside_target_window", "target_not_frontmost", "point_obscured", "hit_test_unavailable", "target_element_mismatch", "accessibility_role_unavailable", "accessibility_role_mismatch", "accessibility_title_unavailable", "accessibility_title_mismatch", "target_changed", "preflight_unavailable"],
-      "description": "Optional fixed diagnostic for an authorized activation preflight or read-only element diagnosis failure, only for capability_unavailable with validation phase, not_dispatched outcome and retryable false. Contains no actual role, title, label, coordinates, screenshot or raw OS error; omitted for other errors and after dispatch."
+      "description": "Optional fixed diagnostic for authorized atomic activation/input or read-only element diagnosis preflight; only for capability_unavailable, validation, not_dispatched and retryable false. Contains no actual role, title, label, coordinates, contact, text, drafts, history, screenshot or raw OS error; omitted after dispatch and for other errors."
     },
     "retry_after_ms": { "type": "integer", "minimum": 0 }
   }

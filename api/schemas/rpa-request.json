@@ -1,18 +1,39 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://wecom-use.local/schemas/rpa-request-v3.json",
+  "$id": "https://wecom-use.local/schemas/rpa-request-v4.json",
   "title": "TaskRequest",
   "type": "object",
   "additionalProperties": false,
   "required": ["protocol_version", "app"],
   "properties": {
-    "protocol_version": { "type": "string", "const": "1" },
+    "protocol_version": { "type": "string", "const": "2" },
     "app": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z][a-z0-9_.-]{0,127}$", "description": "Sole target application ID; syntactically valid unsupported targets are unavailable, never routed to WeCom." },
     "messages": { "type": "array", "items": { "type": "string" } },
-    "instructions": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "https://wecom-use.local/schemas/task-instruction-v1.json" } }
+    "instructions": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "https://wecom-use.local/schemas/task-instruction-v2.json" } }
   },
   "anyOf": [
     { "required": ["instructions"] },
     { "required": ["messages"], "properties": { "messages": { "minItems": 1, "items": { "type": "string", "minLength": 1, "pattern": "\\S" } } } }
+  ],
+  "allOf": [{
+    "if": {
+      "required": ["instructions"],
+      "properties": {
+        "instructions": {
+          "contains": {
+            "type": "object",
+            "required": ["action"],
+            "properties": { "action": { "const": "send_message_by_nickname" } }
+          }
+        }
+      }
+    },
+    "then": {
+      "properties": {
+        "app": { "const": "wecom" },
+        "instructions": { "minItems": 1, "maxItems": 1 }
+      }
+    }
+  }
   ]
 }

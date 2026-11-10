@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://wecom-use.local/schemas/rpa-response-v2.json",
+  "$id": "https://wecom-use.local/schemas/rpa-response-v3.json",
   "title": "TaskResponse",
   "type": "object",
   "required": ["protocol_version", "app", "execution"],
   "properties": {
-    "protocol_version": { "type": "string", "const": "1" },
+    "protocol_version": { "type": "string", "const": "2" },
     "app": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z][a-z0-9_.-]{0,127}$", "description": "Original requested target application ID, not a fixed adapter identifier." },
-    "execution": { "$ref": "https://wecom-use.local/schemas/task-execution-v2.json" }
+    "execution": { "$ref": "https://wecom-use.local/schemas/task-execution-v3.json" }
   }
 }

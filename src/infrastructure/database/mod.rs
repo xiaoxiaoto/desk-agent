@@ -1,3 +1,5 @@
+pub mod coordinate_cache;
+
 use anyhow::Context;
 use sqlx::{
     SqlitePool,
@@ -60,6 +62,9 @@ pub async fn open_security(path: &std::path::Path) -> anyhow::Result<SqlitePool>
         .execute(&pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS capability_audit (id INTEGER PRIMARY KEY, request_id TEXT NOT NULL, occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, app TEXT NOT NULL, capability TEXT NOT NULL, route TEXT NOT NULL, target TEXT NOT NULL, effect TEXT NOT NULL, parameters TEXT NOT NULL, decision TEXT NOT NULL)")
         .execute(&pool).await?;
+    if coordinate_cache::initialize(&pool).await.is_err() {
+        tracing::warn!("Coordinate cache initialization failed; authorization/audit storage remains available");
+    }
     Ok(pool)
 }
 

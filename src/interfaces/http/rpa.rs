@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::local_auth::LocalCredential;
 
 pub fn routes() -> Router {
-    Router::new().route("/api/v1/rpa", post(handle_rpa)).layer(DefaultBodyLimit::max(1024 * 1024))
+    Router::new().route("/api/v2/rpa", post(handle_rpa)).layer(DefaultBodyLimit::max(1024 * 1024))
 }
 
 async fn handle_rpa(
@@ -65,7 +65,7 @@ async fn handle_rpa(
         Ok((_, result)) => {
             let output = if let Some(output) = result {
                 output
-            } else if matches!(instruction, crate::kernel::task::TaskInstruction::LaunchApp) {
+            } else if matches!(instruction, crate::kernel::instruction::TaskInstruction::Atomic(crate::kernel::instruction::AtomicInstruction::ProcessLaunch)) {
                 serde_json::json!({ "open_command_succeeded": true })
             } else {
                 serde_json::json!({ "window_position_submitted": true })

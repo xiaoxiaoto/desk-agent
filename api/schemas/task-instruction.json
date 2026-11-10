@@ -1,19 +1,427 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://wecom-use.local/schemas/task-instruction-v1.json",
+  "$id": "https://wecom-use.local/schemas/task-instruction-v2.json",
   "title": "TaskInstruction",
+  "description": "Exact flat action/params contract: eight AtomicInstruction system operations, two PerceptionInstruction operations and only ApplicationInstruction::SendMessageByNickname. Message accepts text only. Schema lengths count characters; runtime also enforces UTF-8 byte limits, nonblank and control-free text. Nickname search/open/draft/send are internal narrowly parent-delegated helpers, not public actions, aliases or standalone grants. Protocol remains 2 and API v2.",
   "oneOf": [
-    { "type": "object", "additionalProperties": false, "required": ["action"], "properties": { "action": { "const": "launch_app" } } },
-    { "type": "object", "additionalProperties": false, "required": ["action"], "properties": { "action": { "const": "center_app_window" } } },
-    { "type": "object", "additionalProperties": false, "required": ["action"], "properties": { "action": { "const": "capture_app_window" } } },
-    { "type": "object", "additionalProperties": false, "required": ["action", "params"], "properties": { "action": { "const": "detection_app_window_objects" }, "params": { "type": "object", "additionalProperties": false, "required": ["objects"], "properties": { "objects": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S", "description": "Nonblank; at most 256 UTF-8 bytes (enforced by runtime)." } } } } } },
-    { "type": "object", "additionalProperties": false, "required": ["action", "params"], "properties": { "action": { "const": "convert_app_window_coordinates" }, "params": { "type": "object", "additionalProperties": false, "required": ["capture_id", "boxes"], "properties": { "capture_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }, "boxes": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number", "minimum": 0 }, "description": "Finite [x1,y1,x2,y2] original image pixels with x1 < x2 and y1 < y2, within capture dimensions; enforced by runtime." } } } } } },
-    { "type": "object", "additionalProperties": false, "required": ["action", "params"], "properties": { "action": { "const": "click_app_element" }, "params": { "type": "object", "additionalProperties": false, "required": ["point", "expected_role"], "properties": { "point": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" }, "description": "Caller-approved finite macOS global top-left logical screen points, exactly representable as f32 and within the live unique frontmost WeCom window; OS-wide AX hit must match the target PID/window and exact role, with repeated identity and geometry checks before native mouse down/up. Not unrestricted desktop input; enforced by runtime." }, "expected_role": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S", "description": "Caller-provided exact AXRole, not inferred or converted (AXCell is not AXButton); nonblank and at most 256 UTF-8 bytes, enforced by runtime." }, "expected_label": { "type": ["string", "null"], "default": null, "minLength": 1, "maxLength": 256, "pattern": "\\S", "description": "Omitted or null explicitly selects coordinate-plus-role identity: no name/title reading and no claim that the correct message was identified. Caller independently reviews the screenshot and approves the exact point and role; model/application content cannot authorize. A present string must be nonblank and at most 256 UTF-8 bytes; it preserves exact semantic-name matching: nonempty direct AXTitle, or only if absent/empty, standard AXTitleUIElement in the same PID/window with AXStaticText role, using its nonempty AXTitle or otherwise nonempty string AXValue. Direct title mismatch never falls back. No AXDescription, arbitrary children/descendants, unread counts, icon descriptions or guessed labels. Missing eligible name fails closed in name mode; never silently switches modes. Canonical v3 authorization always includes expected_label, null when omitted." } } } } },
-    { "type": "object", "additionalProperties": false, "required": ["action", "params"], "properties": { "action": { "const": "inspect_app_element" }, "params": { "type": "object", "additionalProperties": false, "required": ["point", "expected_role"], "properties": { "point": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" }, "description": "Finite macOS global top-left logical screen points, exactly representable as f32 and within the live unique frontmost WeCom window; OS-wide AX hit must match the target PID/window and exact role. Read-only inspection, not unrestricted desktop input; enforced by runtime." }, "expected_role": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S", "description": "Caller-provided exact AXRole, not inferred or converted (AXCell is not AXButton); nonblank and at most 256 UTF-8 bytes, enforced by runtime." }, "expected_label": { "type": ["string", "null"], "default": null, "minLength": 1, "maxLength": 256, "pattern": "\\S", "description": "Omitted or null explicitly selects coordinate-plus-role identity without name/title reading or message-identity claims; a match is not approval for a later click. A present string must be nonblank and at most 256 UTF-8 bytes; it preserves exact semantic-name matching: nonempty direct AXTitle, or only if absent/empty, standard AXTitleUIElement in the same PID/window with AXStaticText role, using its nonempty AXTitle or otherwise nonempty string AXValue. Direct title mismatch never falls back. No AXDescription, arbitrary children/descendants, unread counts, icon descriptions or guessed labels. Missing eligible name fails closed in name mode; never silently switches modes. Canonical v3 authorization always includes expected_label, null when omitted." } } } } },
-    { "type": "object", "additionalProperties": false, "required": ["action", "params"], "properties": { "action": { "const": "input_app_element" }, "params": { "type": "object", "additionalProperties": false, "required": ["point", "text"], "properties": { "point": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" }, "description": "Finite macOS global top-left logical screen points, exactly representable as f32, not image pixels; must hit the current supported WeCom header AXTextField in its unique frontmost opaque window. Structural selector, splitter-separated column, repeated AX hit, focus and geometry checks are enforced by runtime." }, "text": { "type": "string", "minLength": 1, "maxLength": 256, "allOf": [{ "pattern": "\\S" }, { "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$" }], "description": "Sensitive exact field text, 1..256 UTF-8 bytes (runtime enforced), nonblank and without CR, LF or Unicode control characters. Focus is requested first; no trimming, normalization, append, Enter, chat-editor input or send. Only a digest is audited." } } } } },
-    { "type": "object", "additionalProperties": false, "required": ["action", "params"], "properties": { "action": { "const": "search_contact" }, "params": { "type": "object", "additionalProperties": false, "required": ["name", "exact_match"], "properties": { "name": { "type": "string", "minLength": 1 }, "exact_match": { "type": "boolean" } } } } },
-    { "type": "object", "additionalProperties": false, "required": ["action", "params"], "properties": { "action": { "const": "open_chat" }, "params": { "type": "object", "additionalProperties": false, "required": ["contact"], "properties": { "contact": { "type": "string", "minLength": 1 } } } } },
-    { "type": "object", "additionalProperties": false, "required": ["action", "params"], "properties": { "action": { "const": "send_text" }, "params": { "type": "object", "additionalProperties": false, "required": ["content"], "properties": { "content": { "type": "string", "minLength": 1 } } } } },
-    { "type": "object", "additionalProperties": false, "required": ["action"], "properties": { "action": { "const": "verify_message_sent" } } }
-  ]
+    {
+      "$ref": "#/$defs/atomicInstruction"
+    },
+    {
+      "$ref": "#/$defs/perceptionInstruction"
+    },
+    {
+      "$ref": "#/$defs/applicationInstruction"
+    }
+  ],
+  "$defs": {
+    "atomicInstruction": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/actions/process_launch"
+        },
+        {
+          "$ref": "#/$defs/actions/window_center"
+        },
+        {
+          "$ref": "#/$defs/actions/window_capture"
+        },
+        {
+          "$ref": "#/$defs/actions/click_button"
+        },
+        {
+          "$ref": "#/$defs/actions/click_focus"
+        },
+        {
+          "$ref": "#/$defs/actions/ax_inspect"
+        },
+        {
+          "$ref": "#/$defs/actions/keyboard_text_input"
+        },
+        {
+          "$ref": "#/$defs/actions/keyboard_key_input"
+        }
+      ]
+    },
+    "perceptionInstruction": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/actions/vision_detect"
+        },
+        {
+          "$ref": "#/$defs/actions/screenshot_coordinates_convert"
+        }
+      ]
+    },
+    "applicationInstruction": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/actions/send_message_by_nickname"
+        }
+      ]
+    },
+    "message": {
+      "title": "Message",
+      "oneOf": [{
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "content"],
+        "properties": {
+          "type": { "const": "text" },
+          "content": {
+            "type": "string", "minLength": 1, "maxLength": 256,
+            "allOf": [{ "pattern": "\\S" }, { "not": { "pattern": "[\\u0000-\\u001f\\u007f-\\u009f]" } }],
+            "description": "Exact nonblank text, 1..256 UTF-8 bytes enforced by runtime; no Unicode controls, trimming, rewriting or normalization."
+          }
+        }
+      }]
+    },
+    "actions": {
+      "process_launch": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "const": "process_launch"
+          }
+        }
+      },
+      "window_center": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "const": "window_center"
+          }
+        }
+      },
+      "window_capture": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "const": "window_capture"
+          }
+        }
+      },
+      "vision_detect": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "params"
+        ],
+        "properties": {
+          "action": {
+            "const": "vision_detect"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "objects"
+            ],
+            "properties": {
+              "objects": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "\\S",
+                  "description": "Nonblank; at most 256 UTF-8 bytes (enforced by runtime)."
+                }
+              }
+            }
+          }
+        }
+      },
+      "screenshot_coordinates_convert": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "params"
+        ],
+        "properties": {
+          "action": {
+            "const": "screenshot_coordinates_convert"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "capture_id",
+              "boxes"
+            ],
+            "properties": {
+              "capture_id": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "boxes": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "items": {
+                  "type": "array",
+                  "minItems": 4,
+                  "maxItems": 4,
+                  "items": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "description": "Finite [x1,y1,x2,y2] original image pixels with x1 < x2 and y1 < y2, within capture dimensions; enforced by runtime."
+                }
+              }
+            }
+          }
+        }
+      },
+      "click_button": {
+        "description": "A bounded physical left-mouse-button click, not an AXButton-only target restriction. AXTextField, AXCell and other caller-supplied exact expected_role values require exact target, identity, window and authorization checks. Runtime currently supports only wecom.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "params"
+        ],
+        "properties": {
+          "action": {
+            "const": "click_button"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "point",
+              "expected_role"
+            ],
+            "properties": {
+              "point": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                  "type": "number"
+                },
+                "description": "Caller-approved finite macOS global top-left logical screen points, exactly representable as f32 and within the live unique frontmost WeCom window; OS-wide AX hit must match the target PID/window and exact role, with repeated identity and geometry checks before native mouse down/up. Not unrestricted desktop input; enforced by runtime."
+              },
+              "expected_role": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "\\S",
+                "description": "Caller-provided exact AXRole, not inferred or converted (AXCell is not AXButton); nonblank and at most 256 UTF-8 bytes, enforced by runtime."
+              },
+              "expected_label": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null,
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "\\S",
+                "description": "Omitted or null explicitly selects coordinate-plus-role identity: no name/title reading and no claim that the correct message was identified. Caller independently reviews the screenshot and approves the exact point and role; model/application content cannot authorize. A present string must be nonblank and at most 256 UTF-8 bytes; it preserves exact semantic-name matching: nonempty direct AXTitle, or only if absent/empty, standard AXTitleUIElement in the same PID/window with AXStaticText role, using its nonempty AXTitle or otherwise nonempty string AXValue. Direct title mismatch never falls back. No AXDescription, arbitrary children/descendants, unread counts, icon descriptions or guessed labels. Missing eligible name fails closed in name mode; never silently switches modes. Canonical v3 authorization always includes expected_label, null when omitted."
+              }
+            }
+          }
+        }
+      },
+      "click_focus": {
+        "description": "A bounded physical left-mouse-button click that must also transfer keyboard focus: succeeds only when the application's AXFocusedUIElement exactly matches the clicked element with AXFocused true within 500ms. Focus is observed, never written through AX, and there is no retry or second click. Not an AXButton-only restriction and not unrestricted desktop input; reuses the click_button point, expected_role and expected_label validation. Runtime currently supports only wecom.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "params"
+        ],
+        "properties": {
+          "action": {
+            "const": "click_focus"
+          },
+          "params": {
+            "$ref": "#/$defs/actions/click_button/properties/params"
+          }
+        }
+      },
+      "ax_inspect": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "params"
+        ],
+        "properties": {
+          "action": {
+            "const": "ax_inspect"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "point",
+              "expected_role"
+            ],
+            "properties": {
+              "point": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                  "type": "number"
+                },
+                "description": "Finite macOS global top-left logical screen points, exactly representable as f32 and within the live unique frontmost WeCom window; OS-wide AX hit must match the target PID/window and exact role. Read-only inspection, not unrestricted desktop input; enforced by runtime."
+              },
+              "expected_role": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "\\S",
+                "description": "Caller-provided exact AXRole, not inferred or converted (AXCell is not AXButton); nonblank and at most 256 UTF-8 bytes, enforced by runtime."
+              },
+              "expected_label": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null,
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "\\S",
+                "description": "Omitted or null explicitly selects coordinate-plus-role identity without name/title reading or message-identity claims; a match is not approval for a later click. A present string must be nonblank and at most 256 UTF-8 bytes; it preserves exact semantic-name matching: nonempty direct AXTitle, or only if absent/empty, standard AXTitleUIElement in the same PID/window with AXStaticText role, using its nonempty AXTitle or otherwise nonempty string AXValue. Direct title mismatch never falls back. No AXDescription, arbitrary children/descendants, unread counts, icon descriptions or guessed labels. Missing eligible name fails closed in name mode; never silently switches modes. Canonical v3 authorization always includes expected_label, null when omitted."
+              }
+            }
+          }
+        }
+      },
+      "keyboard_text_input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "params"
+        ],
+        "properties": {
+          "action": {
+            "const": "keyboard_text_input"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "point",
+              "text"
+            ],
+            "properties": {
+              "point": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                  "type": "number"
+                },
+                "description": "Finite macOS global top-left logical screen points, exactly representable as f32, not screenshot pixels. Must repeatedly hit the same editable AXTextField or AXTextArea in the selected frontmost opaque target-app window, with stable PID/window/role/geometry and exact focus. No application header, splitter or search-box selector."
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "allOf": [
+                  {
+                    "pattern": "\\S"
+                  },
+                  {
+                    "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$"
+                  }
+                ],
+                "description": "Sensitive exact replacement text: 1..256 UTF-8 bytes (runtime enforced), nonblank, no CR/LF or Unicode controls. Requires readable/writable AXValue and writable AXFocused; explicitly disabled elements fail. Independent single-use desktop.element.input scope, macos_gui route, main_or_single_app_window target, replace_text effect and element-input-v1-sha256:<digest> of compact UTF-8 serde_json ordered point then text with f64 normalization are required; internal parent delegation does not authorize standalone input. Missing AXEnabled is allowed. One focus request then Command+A and zero-modifier Unicode chunks at most 20 UTF-16 units preserving scalars. Preallocate all keyboard pairs, revalidate target/focus before selection and every chunk, read back exactly within 2 seconds. No AXValue write, clipboard, Enter/Return, send or automatic retry. A message editor can be a target only under a separate exact desktop.element.input grant; internal draft business guards do not grant this primitive."
+              }
+            }
+          }
+        },
+        "description": "Platform atomic input into the current authorized application input box. Supported enabled (or absent enabled attribute), writable AXTextField/AXTextArea only, in the selected frontmost opaque app window. Replaces its entire value; does not search for a business element, validate a contact, send, or expose arbitrary keyboard events. Runtime currently dispatches only app wecom; other apps remain unavailable."
+      },
+      "keyboard_key_input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "params"
+        ],
+        "properties": {
+          "action": {
+            "const": "keyboard_key_input"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "key",
+              "modifiers"
+            ],
+            "properties": {
+              "key": {
+                "const": "return",
+                "description": "Only Return is exposed. Other key names, shortcuts or combinations are rejected by runtime."
+              },
+              "modifiers": {
+                "type": "array",
+                "maxItems": 0,
+                "items": {
+                  "type": "string"
+                },
+                "description": "Must be empty. Modified keystrokes are not supported."
+              }
+            }
+          }
+        },
+        "description": "Platform atomic single key press in the current focus context. Dispatches exactly one preallocated zero-modifier Return key-down/up pair and requires passive per-process routing evidence within 500ms; it never sets focus or types text. Routing is local UI evidence, not application processing, delivery or verification. Runtime currently dispatches only app wecom."
+      },
+      "send_message_by_nickname": {
+        "type": "object",
+        "$comment": "Private SQLite persists one coordinate per row with global and instruction_content scopes, no second memory cache, 192/1024 scope capacities and 60-second successful-validation touch throttling. Global logical points are main-window-relative; exact-nickname contact candidates are popup-relative. Stable versioned geometry excludes PID/window identities; live identity checks are always required. Mandatory launch, center and real measurement precede cache lookup. All four validated warm hits retain measurement and fresh contact captures with zero vision/conversion; fully cold flow reuses measurement for four captures and four vision/conversion calls. Implementation verification is in progress; no performance or real-send claim.",
+        "description": "Sole exact instruction for app wecom; no natural-language planner. A dedicated single-use parent wecom.message.send_by_nickname grant binds app wecom, route macos_gui, target exact_nickname_conversation, effect send_text_messages and fixed parameters instruction:send_message_by_nickname:v1, independent of all call parameters. Content-bound digest values cannot authorize execution and are rejected as grants without conversion or automatic regrant. The send-by-nickname-v1-sha256 digest over compact UTF-8 serde struct fields nickname,messages,interval_ms in that order is only immutable request audit/delegation/revocation identity. Atomically check and consume with durable intent before mandatory process_launch then window_center and real measurement, then query each SQLite coordinate only in its UI phase within the grant validity period. Recheck exact immutable current-request digest/lease and app/route/action restrictions before every child without per-child approval; do not change the request within the task or use ambient or minted broad grants. Live-validate every candidate; missing/stale coordinates require real screenshot/local vision/coordinate conversion. Contact reuse requires a fresh whole-window ContactCapture, exact search query, unique exact ordinary-contact AX identity, popup ownership and original binding checked again before dispatch. Cache keys use app/route/control/layout version and actual geometry, with instruction and exact nickname digest for content records; message text and interval do not affect localization keys. No nickname/message plaintext is cached. Cache failures may degrade only localization, never authorization/audit; no input replay to populate cache. Local vision is conditional on actual fallback need; discovery cannot promise hits. Screen Recording remains required. Send text messages once in original order, wait interval_ms only between completed sends, stop on any failure/unknown, preserve partial outcomes and all four live-validated cache_hits flags including contact_result, and never resend. Local UI evidence is not delivery/read receipt or independent verification.",
+        "additionalProperties": false,
+        "required": ["action", "params"],
+        "properties": {
+          "action": { "const": "send_message_by_nickname" },
+          "params": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["nickname", "messages", "interval_ms"],
+            "properties": {
+              "nickname": {
+                "type": "string", "minLength": 1, "maxLength": 256,
+                "allOf": [{ "pattern": "\\S" }, { "not": { "pattern": "[\\u0000-\\u001f\\u007f-\\u009f]" } }],
+                "description": "Exact nonblank control-free nickname, 1..256 UTF-8 bytes enforced by runtime. Preserve original whitespace and Unicode; no trimming, rewriting or normalization."
+              },
+              "messages": {
+                "type": "array", "minItems": 1, "maxItems": 100,
+                "items": { "$ref": "#/$defs/message" },
+                "description": "Ordered typed Message list, distinct from outer TaskRequest.messages Vec<String>."
+              },
+              "interval_ms": {
+                "type": "integer", "minimum": 0, "maximum": 60000,
+                "description": "Required delay in milliseconds between completed sends only; runtime additionally enforces (messages.length - 1) * interval_ms <= 600000."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }
