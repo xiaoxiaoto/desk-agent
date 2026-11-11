@@ -991,6 +991,21 @@ pub(crate) mod query {
         ensure!(error == 0, "Accessibility hit test unavailable");
         owned(hit, "accessibility hit-test result")
     }
+    /// Copy a short accessibility string; longer values are rejected, not truncated.
+    pub(crate) fn bounded_string(value: Reference<'_>, max_utf16: isize) -> Result<String> {
+        ensure!(value.kind() == ValueKind::String, "Invalid accessibility string value");
+        let length = unsafe { CFStringGetLength(value.raw) };
+        ensure!((0..=max_utf16).contains(&length), "Accessibility string exceeds limit");
+        let mut bytes = vec![0_u8; length as usize * 4];
+        let mut used = 0;
+        let converted = unsafe {
+            CFStringGetBytes(value.raw, CFRange { location: 0, length }, 0x0800_0100, 0, false,
+                bytes.as_mut_ptr(), bytes.len() as isize, &mut used)
+        };
+        ensure!(converted == length && used >= 0 && used as usize <= bytes.len(), "Accessibility string conversion failed");
+        bytes.truncate(used as usize);
+        String::from_utf8(bytes).context("Invalid accessibility string encoding")
+    }
     pub(crate) fn bounded_utf8_matches(value: Reference<'_>, expected: &str) -> Result<bool> {
         ensure!(value.kind() == ValueKind::String, "Invalid accessibility string value");
         let length = unsafe { CFStringGetLength(value.raw) };

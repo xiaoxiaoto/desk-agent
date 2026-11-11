@@ -26,7 +26,7 @@ pub fn send_message_by_nickname_capability() -> Capability {
             "ScreenCaptureKit whole app-window screenshots including child windows (macOS 14.2 or later); no screen-region or full-screen fallback",
             "Installed WeCom, one unambiguous main window, and Return configured to submit messages",
             "Local wevisone-vl-4b vision endpoint when any coordinate requires cache-miss or stale-candidate localization; discovery cannot predict hits",
-            "One explicit single-use instruction authorization with fixed parameters instruction:send_message_by_nickname:v1, independent of nickname/messages/interval",
+            "Install-time standing grant (desk-agent setup) or one explicit single-use instruction authorization with fixed parameters instruction:send_message_by_nickname:v2, independent of nickname/messages/interval",
         ],
         limitations: vec![
             "Launches, centers and captures actual geometry before querying private SQLite coordinates; persistent keys exclude process/window identities, which are always checked live.",
@@ -161,11 +161,11 @@ pub fn app_window_capture_capability() -> Capability {
     }
 }
 
-/// Request the OS permission only for an explicitly authorized capture task.
-pub fn request_screen_recording_permission() -> bool {
+/// Preflight-only Screen Recording check; dispatch never shows an OS prompt.
+pub fn screen_recording_allowed() -> bool {
     #[cfg(target_os = "macos")]
     {
-        macos_desktop::request_screen_recording_permission()
+        macos_desktop::screen_recording_allowed()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -439,6 +439,24 @@ fn send_chat_draft(contact: &str, content: &str) -> anyhow::Result<()> {
     { macos_desktop::send_chat_draft(contact, content) }
     #[cfg(not(target_os = "macos"))]
     { anyhow::bail!("WeCom draft sending is supported only on macOS") }
+}
+
+/// A pasted attachment must appear as exactly one object-replacement
+/// placeholder; any text means the pasteboard or editor was not ours.
+#[cfg(any(target_os = "macos", test))]
+fn attachment_draft_value(value: &str) -> bool {
+    value == "\u{FFFC}"
+}
+
+#[cfg(test)]
+mod attachment_draft_tests {
+    #[test]
+    fn only_a_single_placeholder_is_an_attachment_preview() {
+        assert!(super::attachment_draft_value("\u{FFFC}"));
+        for value in ["", "x", "\u{FFFC}\u{FFFC}", "\u{FFFC}x", " \u{FFFC}", "[图片]"] {
+            assert!(!super::attachment_draft_value(value));
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]

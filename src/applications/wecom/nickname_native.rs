@@ -4,6 +4,23 @@ use super::AppWindowCapture;
 use crate::kernel::task::{valid_app_input, valid_open_chat};
 use anyhow::{Result, ensure};
 
+/// Immutable, task-private attachment snapshot prepared and checked by Runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attachment {
+    pub path: std::path::PathBuf,
+    pub filename: String,
+    pub mime_type: String,
+    pub is_image: bool,
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
+/// Opaque evidence of one pasted attachment preview; never crosses tasks.
+pub struct AttachmentSession {
+    #[cfg(target_os = "macos")]
+    draft: super::macos_desktop::AttachmentDraft,
+}
+
 /// Sanitized evidence about the contact click, not about earlier GUI effects.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct ContactError {
@@ -215,4 +232,52 @@ pub fn send_draft(nickname: &str, content: &str) -> Result<()> {
         "Invalid WeCom submission"
     );
     super::send_chat_draft(nickname, content)
+}
+
+fn valid_attachment(nickname: &str, attachment: &Attachment) -> bool {
+    valid_open_chat(nickname) && attachment.path.is_absolute() && attachment.size_bytes > 0
+        && attachment.path.file_name().and_then(|n| n.to_str()) == Some(attachment.filename.as_str())
+        && (!attachment.is_image || matches!(attachment.mime_type.as_str(), "image/png" | "image/jpeg"))
+}
+
+/// Pastes one Runtime-pinned snapshot into the live-validated empty composer.
+pub fn write_attachment(point: [f64; 2], nickname: &str, attachment: &Attachment) -> Result<AttachmentSession> {
+    ensure!(valid_app_input(&point, "x") && valid_attachment(nickname, attachment), "Invalid WeCom attachment");
+    #[cfg(target_os = "macos")]
+    {
+        super::macos_desktop::nickname_validate_control(Control::Composer, point, nickname)?;
+        Ok(AttachmentSession { draft: super::macos_desktop::write_chat_attachment(nickname, attachment)? })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        anyhow::bail!("WeCom nickname workflow requires macOS")
+    }
+}
+
+pub fn validate_attachment_submission(nickname: &str, attachment: &Attachment, session: &AttachmentSession) -> Result<()> {
+    ensure!(valid_attachment(nickname, attachment), "Invalid WeCom attachment");
+    #[cfg(target_os = "macos")]
+    {
+        super::macos_desktop::preflight_send_chat_attachment(nickname, &session.draft)
+            .map_err(|_| anyhow::anyhow!("WeCom attachment submission validation failed"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = session;
+        anyhow::bail!("WeCom nickname workflow requires macOS")
+    }
+}
+
+/// One Return for the exact pasted preview; any error after dispatch is unknown.
+pub fn send_attachment(nickname: &str, attachment: &Attachment, session: &AttachmentSession) -> Result<()> {
+    ensure!(valid_attachment(nickname, attachment), "Invalid WeCom attachment");
+    #[cfg(target_os = "macos")]
+    {
+        super::macos_desktop::send_chat_attachment(nickname, &session.draft)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = session;
+        anyhow::bail!("WeCom nickname workflow requires macOS")
+    }
 }

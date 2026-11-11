@@ -79,12 +79,29 @@ pub(crate) fn valid_chat_draft(contact: &str, text: &str) -> bool {
         && !text.chars().any(char::is_control)
 }
 
+fn valid_media(path: &str, filename: &str, mime_type: &str) -> bool {
+    let local = std::path::Path::new(path);
+    let valid_token = |token: &str| !token.is_empty() && token.bytes().all(|b|
+        b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'));
+    local.is_absolute()
+        && path.len() <= 4096
+        && !path.chars().any(char::is_control)
+        && !filename.trim().is_empty()
+        && filename.len() <= 255
+        && !filename.chars().any(|c| c.is_control() || c == '/' || c == '\\')
+        && local.file_name().and_then(|name| name.to_str()) == Some(filename)
+        && mime_type.len() <= 127
+        && mime_type.split_once('/').is_some_and(|(kind, subtype)| valid_token(kind) && valid_token(subtype))
+}
+
 pub fn valid_send_message_by_nickname(nickname: &str, messages: &[Message], interval_ms: u64) -> bool {
     valid_open_chat(nickname)
         && !messages.is_empty()
         && messages.len() <= 100
         && messages.iter().all(|message| match message {
             Message::Text { content } => valid_app_input(&[0.0, 0.0], content),
+            Message::Image { path, filename, mime_type } => valid_media(path, filename, mime_type) && matches!(mime_type.as_str(), "image/png" | "image/jpeg"),
+            Message::File { path, filename, mime_type } => valid_media(path, filename, mime_type),
         })
         && interval_ms <= 60_000
         && (messages.len().saturating_sub(1) as u64) * interval_ms <= 600_000

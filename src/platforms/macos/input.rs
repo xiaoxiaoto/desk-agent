@@ -210,12 +210,12 @@ impl Drop for MouseMonitor {
 }
 
 struct KeyEvidence {
-    token: i64, pid: i32, key: u16, stage: u8, down: u64, up: u64, disabled: bool,
+    token: i64, pid: i32, key: u16, flags: u64, stage: u8, down: u64, up: u64, disabled: bool,
 }
 impl KeyEvidence {
     fn observe(&mut self, kind: u32, timestamp: u64, token: i64, pid: i64, key: i64, flags: u64) {
         if self.disabled || token != self.token { return; }
-        if pid != i64::from(self.pid) || key != i64::from(self.key) || flags != 0 {
+        if pid != i64::from(self.pid) || key != i64::from(self.key) || flags != self.flags {
             self.disabled = true;
             return;
         }
@@ -249,8 +249,12 @@ impl KeyboardMonitor {
         Self::for_key(pid, token, 36)
     }
     pub(crate) fn for_key(pid: i32, token: i64, key: u16) -> Option<Self> {
+        Self::for_chord(pid, token, key, 0)
+    }
+    /// Correlated evidence for one key with an exact modifier mask.
+    pub(crate) fn for_chord(pid: i32, token: i64, key: u16, flags: u64) -> Option<Self> {
         if !input_monitoring_available() { return None; }
-        let mut evidence = Box::new(KeyEvidence { token, pid, key, stage: 0, down: 0, up: 0, disabled: false });
+        let mut evidence = Box::new(KeyEvidence { token, pid, key, flags, stage: 0, down: 0, up: 0, disabled: false });
         let port = unsafe { CGEventTapCreateForPid(pid, 1, 1, (1 << 10) | (1 << 11),
             key_tap_callback, (&mut *evidence as *mut KeyEvidence).cast()) };
         if port.is_null() { return None; }
@@ -278,7 +282,7 @@ mod key_evidence_tests {
     use super::KeyEvidence;
 
     fn evidence() -> KeyEvidence {
-        KeyEvidence { token: 123, pid: 42, key: 36, stage: 0, down: 0, up: 0, disabled: false }
+        KeyEvidence { token: 123, pid: 42, key: 36, flags: 0, stage: 0, down: 0, up: 0, disabled: false }
     }
 
     #[test]
@@ -295,6 +299,20 @@ mod key_evidence_tests {
         assert!(e.complete());
         e.observe(11, 3, 123, 42, 36, 0);
         assert!(!e.complete());
+    }
+
+    #[test]
+    fn chord_requires_exact_modifier_mask() {
+        let mut e = KeyEvidence { token: 1, pid: 42, key: 9, flags: 0x10_0000, stage: 0, down: 0, up: 0, disabled: false };
+        e.observe(10, 1, 1, 42, 9, 0x10_0000);
+        e.observe(11, 2, 1, 42, 9, 0x10_0000);
+        assert!(e.complete());
+        for flags in [0, 0x12_0000] {
+            let mut e = KeyEvidence { token: 1, pid: 42, key: 9, flags: 0x10_0000, stage: 0, down: 0, up: 0, disabled: false };
+            e.observe(10, 1, 1, 42, 9, flags);
+            e.observe(11, 2, 1, 42, 9, 0x10_0000);
+            assert!(!e.complete());
+        }
     }
 
     #[test]

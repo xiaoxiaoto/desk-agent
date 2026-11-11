@@ -11,7 +11,7 @@ const APPLICATION: DesktopApplication = DesktopApplication {
     bundle_identifier: c"com.tencent.WeWorkMac",
     display_name: "WeCom",
 };
-pub(super) use crate::platforms::macos::permissions::{trusted, screen_recording_allowed, request_screen_recording_permission, input_monitoring_available};
+pub(super) use crate::platforms::macos::permissions::{trusted, screen_recording_allowed, input_monitoring_available};
 pub(super) fn target() -> Result<desktop::Target> { desktop::target(APPLICATION) }
 pub(super) fn center() -> Result<()> { desktop::center(APPLICATION) }
 pub(super) fn preflight_keyboard_key_input() -> DiagnosticResult<()> {
@@ -1378,4 +1378,135 @@ pub(super) fn write_chat_draft(contact: &str, text: &str) -> Result<()> {
     }
     Ok(())
 }
+
+
+/// Task-local evidence for one pasted attachment. It holds no AX reference;
+/// every later step re-resolves the live editor and compares this snapshot.
+pub(super) struct AttachmentDraft {
+    token: crate::platforms::macos::clipboard::ClipboardToken,
+    value: String,
+}
+
+const ATTACHMENT_DRAFT_LIMIT: isize = 64;
+
+fn draft_value(editor: Element<'_>) -> Result<String> {
+    let value = attribute(editor, b"AXValue\0")?;
+    bounded_string(value.as_ref(), ATTACHMENT_DRAFT_LIMIT)
+}
+
+fn verified_snapshot(attachment: &super::nickname_native::Attachment) -> Result<Option<Vec<u8>>> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(&attachment.path).context("Attachment snapshot unavailable")?;
+    ensure!(bytes.len() as u64 == attachment.size_bytes
+        && format!("{:x}", Sha256::digest(&bytes)) == attachment.sha256, "Attachment snapshot changed");
+    Ok(attachment.is_image.then_some(bytes))
+}
+
+/// Paste exactly one staged attachment into the verified empty editor of the
+/// exact conversation. Any error after the pasteboard write is an unknown outcome.
+pub(super) fn write_chat_attachment(contact: &str, attachment: &super::nickname_native::Attachment) -> Result<AttachmentDraft> {
+    use crate::platforms::macos::{clipboard, keyboard};
+    let initial = draft_target(contact)?;
+    ensure!(draft_value_matches(initial.editor.as_ref(), "")?, "Draft is not empty");
+    let app = application(initial.main.pid)?;
+    let baseline = history_snapshot(&initial)?;
+    let image = verified_snapshot(attachment)?;
+    let current = draft_target(contact)?;
+    ensure!(same_draft(&initial, &current) && draft_value_matches(current.editor.as_ref(), "")?,
+        "Draft changed before dispatch");
+
+    // From the pasteboard write onward the payload may be visible to other
+    // local applications and any failure is reported as unknown by Runtime.
+    let token = match &image {
+        Some(bytes) => clipboard::write_image(bytes, &attachment.mime_type)?,
+        None => clipboard::write_file(&attachment.path, &attachment.filename)?,
+    };
+    initial.editor.as_ref().set_focused()?;
+    let focus_deadline = Instant::now() + Duration::from_millis(500);
+    while !search_focus_matches(app.as_ref(), initial.editor.as_ref())? {
+        ensure!(Instant::now() < focus_deadline, "Draft focus was requested but its outcome is unknown");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    keyboard::press_paste_guarded(APPLICATION, || {
+        let current = draft_target(contact)?;
+        let history = history_snapshot(&current)?;
+        ensure!(same_draft(&initial, &current) && history_prefix(&baseline, &history)
+            && baseline.rows.len() == history.rows.len()
+            && search_focus_matches(app.as_ref(), current.editor.as_ref())?
+            && draft_value_matches(current.editor.as_ref(), "")?
+            && clipboard::unchanged(token)?, "Draft or pasteboard changed before paste");
+        Ok(())
+    })?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        ensure!(Instant::now() < deadline, "Attachment paste outcome unknown");
+        observe_for(Duration::from_millis(10));
+        let current = draft_target(contact)?;
+        let history = history_snapshot(&current)?;
+        ensure!(same_draft(&initial, &current) && history_prefix(&baseline, &history)
+            && baseline.rows.len() == history.rows.len()
+            && search_focus_matches(app.as_ref(), current.editor.as_ref())?, "Draft target changed after paste");
+        let value = draft_value(current.editor.as_ref())?;
+        if value.is_empty() { continue; }
+        ensure!(super::attachment_draft_value(&value), "Unexpected draft content after paste");
+        return Ok(AttachmentDraft { token, value });
+    }
+}
+
+pub(super) fn preflight_send_chat_attachment(contact: &str, draft: &AttachmentDraft) -> DiagnosticResult<()> {
+    if !trusted() { return Err(Diagnostic::AccessibilityUnavailable); }
+    let a = draft_target(contact).map_err(|_| Diagnostic::TargetElementMismatch)?;
+    let app = application(a.main.pid).map_err(|_| Diagnostic::PreflightUnavailable)?;
+    if !search_focus_matches(app.as_ref(), a.editor.as_ref()).map_err(|_| Diagnostic::PreflightUnavailable)?
+        || !draft_value_matches(a.editor.as_ref(), &draft.value).map_err(|_| Diagnostic::PreflightUnavailable)? {
+        return Err(Diagnostic::TargetElementMismatch);
+    }
+    let history = history_snapshot(&a).map_err(|_| Diagnostic::PreflightUnavailable)?;
+    let b = draft_target(contact).map_err(|_| Diagnostic::TargetChanged)?;
+    let other = history_snapshot(&b).map_err(|_| Diagnostic::TargetChanged)?;
+    if !same_draft(&a, &b) || !history_prefix(&history, &other) || history.rows.len() != other.rows.len()
+        || !search_focus_matches(app.as_ref(), b.editor.as_ref()).map_err(|_| Diagnostic::PreflightUnavailable)?
+        || !draft_value_matches(b.editor.as_ref(), &draft.value).map_err(|_| Diagnostic::PreflightUnavailable)? {
+        return Err(Diagnostic::TargetChanged);
+    }
+    crate::platforms::macos::keyboard::preflight(APPLICATION)?;
+    Ok(())
+}
+
+/// One Return for the exact pasted preview, then observe an emptied editor and
+/// at least one appended history row. This is local UI evidence, not delivery.
+pub(super) fn send_chat_attachment(contact: &str, draft: &AttachmentDraft) -> Result<()> {
+    let initial = draft_target(contact)?;
+    let app = application(initial.main.pid)?;
+    ensure!(search_focus_matches(app.as_ref(), initial.editor.as_ref())? && draft_value_matches(initial.editor.as_ref(), &draft.value)?,
+        "Draft or focus changed");
+    let baseline = history_snapshot(&initial)?;
+    crate::platforms::macos::keyboard::press_return_guarded(APPLICATION, || {
+        let current = draft_target(contact)?;
+        let final_history = history_snapshot(&current)?;
+        ensure!(same_draft(&initial, &current) && history_prefix(&baseline, &final_history)
+            && baseline.rows.len() == final_history.rows.len()
+            && search_focus_matches(app.as_ref(), current.editor.as_ref())?
+            && draft_value_matches(current.editor.as_ref(), &draft.value)?, "Draft changed before dispatch");
+        Ok(())
+    })?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        ensure!(Instant::now() < deadline, "Submission outcome unknown");
+        observe_for(Duration::from_millis(10));
+        let current = draft_target(contact)?;
+        ensure!(same_draft(&initial, &current), "Submission target changed");
+        let history = history_snapshot(&current)?;
+        ensure!(history_prefix(&baseline, &history), "History changed");
+        if draft_value_matches(current.editor.as_ref(), "")? && history.rows.len() > baseline.rows.len() {
+            ensure!(Instant::now() < deadline, "Submission outcome unknown");
+            // Best effort: only clears while the pasteboard is still ours.
+            if crate::platforms::macos::clipboard::clear_if_unchanged(draft.token).is_err() {
+                tracing::warn!("Attachment pasteboard cleanup unavailable");
+            }
+            return Ok(());
+        }
+    }
+}
+
 

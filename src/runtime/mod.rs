@@ -1,5 +1,7 @@
 pub mod permission;
+pub mod grants;
 mod nickname;
+pub mod queue;
 // All local runtime GUI tasks share this guard. Composite children never recurse
 // through invoke_task, so the whole batch (including waits) owns it exactly once.
 static GUI_EXECUTOR: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -37,10 +39,12 @@ pub enum InvokeError {
     ActivationPreflight(ActivationDiagnostic),
     OutcomeUnknown,
     InvalidInput,
+    /// The instruction queue reached its configured pending bound; nothing was enqueued.
+    RateLimited,
 }
 
 async fn authorized(database: &SqlitePool, scope: (&str, &str, &str)) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?)")
+    sqlx::query_scalar::<_, i64>(grants::EXACT_OR_STANDING)
         .bind(scope.0).bind(ROUTE).bind(scope.1).bind(scope.2).bind(PARAMETERS)
         .fetch_one(database).await.map(|v| v == 1)
 }
@@ -55,34 +59,34 @@ pub async fn app_window_capture_authorized(database: &SqlitePool) -> Result<bool
 
 /// Advisory catalog check; dispatch always checks the exact request digest again.
 pub async fn app_window_conversion_any_grant(database: &SqlitePool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND length(parameters) = 82 AND substr(parameters, 1, 18) = 'conversion-sha256:' AND substr(parameters, 19) NOT GLOB '*[^0-9a-f]*')")
+    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ?1 AND route = ?2 AND target = ?3 AND effect = ?4 AND length(parameters) = 82 AND substr(parameters, 1, 18) = 'conversion-sha256:' AND substr(parameters, 19) NOT GLOB '*[^0-9a-f]*') OR EXISTS(SELECT 1 FROM standing_capability_grants WHERE app = 'wecom' AND capability = ?1 AND route = ?2 AND target = ?3 AND effect = ?4)")
         .bind(WINDOW_CONVERT.0).bind(ROUTE).bind(WINDOW_CONVERT.1).bind(WINDOW_CONVERT.2)
         .fetch_one(database).await.map(|v| v == 1)
 }
-/// Advisory only: a grant is specific to one exact request and is consumed on use.
+/// Advisory only: an exact grant is specific to one request and consumed on use; a standing grant covers the scope.
 pub async fn app_element_activation_any_grant(database: &SqlitePool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND length(parameters) = 83 AND substr(parameters, 1, 19) = 'activate-v3-sha256:' AND substr(parameters, 20) NOT GLOB '*[^0-9a-f]*')")
+    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ?1 AND route = ?2 AND target = ?3 AND effect = ?4 AND length(parameters) = 83 AND substr(parameters, 1, 19) = 'activate-v3-sha256:' AND substr(parameters, 20) NOT GLOB '*[^0-9a-f]*') OR EXISTS(SELECT 1 FROM standing_capability_grants WHERE app = 'wecom' AND capability = ?1 AND route = ?2 AND target = ?3 AND effect = ?4)")
         .bind(ELEMENT_ACTIVATE.0).bind(ROUTE).bind(ELEMENT_ACTIVATE.1).bind(ELEMENT_ACTIVATE.2)
         .fetch_one(database).await.map(|v| v == 1)
 }
 
 /// Advisory only: diagnosis requires an exact, separately scoped grant.
 pub async fn app_element_diagnosis_any_grant(database: &SqlitePool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND length(parameters) = 83 AND substr(parameters, 1, 19) = 'diagnose-v3-sha256:' AND substr(parameters, 20) NOT GLOB '*[^0-9a-f]*')")
+    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ?1 AND route = ?2 AND target = ?3 AND effect = ?4 AND length(parameters) = 83 AND substr(parameters, 1, 19) = 'diagnose-v3-sha256:' AND substr(parameters, 20) NOT GLOB '*[^0-9a-f]*') OR EXISTS(SELECT 1 FROM standing_capability_grants WHERE app = 'wecom' AND capability = ?1 AND route = ?2 AND target = ?3 AND effect = ?4)")
         .bind(ELEMENT_DIAGNOSE.0).bind(ROUTE).bind(ELEMENT_DIAGNOSE.1).bind(ELEMENT_DIAGNOSE.2)
         .fetch_one(database).await.map(|v| v == 1)
 }
 
 /// Advisory only: focus requires an exact, separately scoped grant.
 pub async fn app_element_focus_any_grant(database: &SqlitePool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND length(parameters) = 80 AND substr(parameters, 1, 16) = 'focus-v1-sha256:' AND substr(parameters, 17) NOT GLOB '*[^0-9a-f]*')")
+    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ?1 AND route = ?2 AND target = ?3 AND effect = ?4 AND length(parameters) = 80 AND substr(parameters, 1, 16) = 'focus-v1-sha256:' AND substr(parameters, 17) NOT GLOB '*[^0-9a-f]*') OR EXISTS(SELECT 1 FROM standing_capability_grants WHERE app = 'wecom' AND capability = ?1 AND route = ?2 AND target = ?3 AND effect = ?4)")
         .bind(ELEMENT_FOCUS.0).bind(ROUTE).bind(ELEMENT_FOCUS.1).bind(ELEMENT_FOCUS.2)
         .fetch_one(database).await.map(|v| v == 1)
 }
 
 /// Advisory only: key input requires an exact, separately scoped grant.
 pub async fn app_key_input_any_grant(database: &SqlitePool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND length(parameters) = 84 AND substr(parameters, 1, 20) = 'key-input-v1-sha256:' AND substr(parameters, 21) NOT GLOB '*[^0-9a-f]*')")
+    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ?1 AND route = ?2 AND target = ?3 AND effect = ?4 AND length(parameters) = 84 AND substr(parameters, 1, 20) = 'key-input-v1-sha256:' AND substr(parameters, 21) NOT GLOB '*[^0-9a-f]*') OR EXISTS(SELECT 1 FROM standing_capability_grants WHERE app = 'wecom' AND capability = ?1 AND route = ?2 AND target = ?3 AND effect = ?4)")
         .bind(KEY_INPUT.0).bind(ROUTE).bind(KEY_INPUT.1).bind(KEY_INPUT.2)
         .fetch_one(database).await.map(|v| v == 1)
 }
@@ -90,7 +94,7 @@ pub async fn app_key_input_any_grant(database: &SqlitePool) -> Result<bool, sqlx
 
 /// Advisory only: dispatch still checks the exact point and text.
 pub async fn app_element_input_any_grant(database: &SqlitePool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND length(parameters) = 88 AND substr(parameters, 1, 24) = 'element-input-v1-sha256:' AND substr(parameters, 25) NOT GLOB '*[^0-9a-f]*')")
+    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ?1 AND route = ?2 AND target = ?3 AND effect = ?4 AND length(parameters) = 88 AND substr(parameters, 1, 24) = 'element-input-v1-sha256:' AND substr(parameters, 25) NOT GLOB '*[^0-9a-f]*') OR EXISTS(SELECT 1 FROM standing_capability_grants WHERE app = 'wecom' AND capability = ?1 AND route = ?2 AND target = ?3 AND effect = ?4)")
         .bind(ELEMENT_INPUT.0).bind(ROUTE).bind(ELEMENT_INPUT.1).bind(ELEMENT_INPUT.2)
         .fetch_one(database).await.map(|v| v == 1)
 }
@@ -117,17 +121,15 @@ async fn audit_text_input(database: &SqlitePool, request_id: &str, parameters: &
     Ok(())
 }
 
-// The consuming recheck and its durable audit commit together before any focus/write.
+// The consuming recheck (exact grant consumed, standing grant kept) and its durable audit commit together before any focus/write.
 async fn authorize_text_input(database: &SqlitePool, request_id: &str, parameters: &str, consume: bool, scope: (&str, &str, &str)) -> Result<bool, sqlx::Error> {
     let mut tx = database.begin().await?;
     let insert = "INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)";
     sqlx::query(insert).bind(request_id).bind(scope.0).bind(ROUTE).bind(scope.1).bind(scope.2).bind(parameters).bind("authorization_check").execute(&mut *tx).await?;
     let granted = if consume {
-        sqlx::query("DELETE FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?")
-            .bind(scope.0).bind(ROUTE).bind(scope.1).bind(scope.2).bind(parameters)
-            .execute(&mut *tx).await?.rows_affected() == 1
+        grants::consume(&mut tx, scope.0, ROUTE, scope.1, scope.2, parameters).await?
     } else {
-        sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?)")
+        sqlx::query_scalar::<_, i64>(grants::EXACT_OR_STANDING)
             .bind(scope.0).bind(ROUTE).bind(scope.1).bind(scope.2).bind(parameters)
             .fetch_one(&mut *tx).await? == 1
     };
@@ -226,17 +228,16 @@ async fn audit_activation(database: &SqlitePool, request_id: &str, parameters: &
 }
 
 // Both initial authorization and the consuming recheck durably audit their decision.
-// A DELETE is the atomic check-and-consume, and rolls back if the audit fails.
+// grants::consume deletes an exact grant or accepts a standing one inside the same
+// transaction, so the check rolls back if the audit fails.
 async fn authorize_activation(database: &SqlitePool, request_id: &str, parameters: &str, consume: bool) -> Result<bool, sqlx::Error> {
     let mut tx = database.begin().await?;
     let insert = "INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)";
     sqlx::query(insert).bind(request_id).bind(ELEMENT_ACTIVATE.0).bind(ROUTE).bind(ELEMENT_ACTIVATE.1).bind(ELEMENT_ACTIVATE.2).bind(parameters).bind("authorization_check").execute(&mut *tx).await?;
     let granted = if consume {
-        sqlx::query("DELETE FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?")
-            .bind(ELEMENT_ACTIVATE.0).bind(ROUTE).bind(ELEMENT_ACTIVATE.1).bind(ELEMENT_ACTIVATE.2).bind(parameters)
-            .execute(&mut *tx).await?.rows_affected() == 1
+        grants::consume(&mut tx, ELEMENT_ACTIVATE.0, ROUTE, ELEMENT_ACTIVATE.1, ELEMENT_ACTIVATE.2, parameters).await?
     } else {
-        sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?)")
+        sqlx::query_scalar::<_, i64>(grants::EXACT_OR_STANDING)
             .bind(ELEMENT_ACTIVATE.0).bind(ROUTE).bind(ELEMENT_ACTIVATE.1).bind(ELEMENT_ACTIVATE.2).bind(parameters)
             .fetch_one(&mut *tx).await? == 1
     };
@@ -250,7 +251,7 @@ async fn authorize_diagnosis(database: &SqlitePool, request_id: &str, parameters
     let mut tx = database.begin().await?;
     let insert = "INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)";
     sqlx::query(insert).bind(request_id).bind(ELEMENT_DIAGNOSE.0).bind(ROUTE).bind(ELEMENT_DIAGNOSE.1).bind(ELEMENT_DIAGNOSE.2).bind(parameters).bind("authorization_check").execute(&mut *tx).await?;
-    let granted = sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?)")
+    let granted = sqlx::query_scalar::<_, i64>(grants::EXACT_OR_STANDING)
         .bind(ELEMENT_DIAGNOSE.0).bind(ROUTE).bind(ELEMENT_DIAGNOSE.1).bind(ELEMENT_DIAGNOSE.2).bind(parameters).fetch_one(&mut *tx).await? == 1;
     sqlx::query(insert).bind(request_id).bind(ELEMENT_DIAGNOSE.0).bind(ROUTE).bind(ELEMENT_DIAGNOSE.1).bind(ELEMENT_DIAGNOSE.2).bind(parameters).bind(if granted { allowed_decision } else { "denied" }).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -276,11 +277,9 @@ async fn authorize_focus(database: &SqlitePool, request_id: &str, parameters: &s
     let insert = "INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)";
     sqlx::query(insert).bind(request_id).bind(ELEMENT_FOCUS.0).bind(ROUTE).bind(ELEMENT_FOCUS.1).bind(ELEMENT_FOCUS.2).bind(parameters).bind("authorization_check").execute(&mut *tx).await?;
     let granted = if consume {
-        sqlx::query("DELETE FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?")
-            .bind(ELEMENT_FOCUS.0).bind(ROUTE).bind(ELEMENT_FOCUS.1).bind(ELEMENT_FOCUS.2).bind(parameters)
-            .execute(&mut *tx).await?.rows_affected() == 1
+        grants::consume(&mut tx, ELEMENT_FOCUS.0, ROUTE, ELEMENT_FOCUS.1, ELEMENT_FOCUS.2, parameters).await?
     } else {
-        sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?)")
+        sqlx::query_scalar::<_, i64>(grants::EXACT_OR_STANDING)
             .bind(ELEMENT_FOCUS.0).bind(ROUTE).bind(ELEMENT_FOCUS.1).bind(ELEMENT_FOCUS.2).bind(parameters)
             .fetch_one(&mut *tx).await? == 1
     };
@@ -302,11 +301,9 @@ async fn authorize_key_input(database: &SqlitePool, request_id: &str, parameters
     let insert = "INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)";
     sqlx::query(insert).bind(request_id).bind(KEY_INPUT.0).bind(ROUTE).bind(KEY_INPUT.1).bind(KEY_INPUT.2).bind(parameters).bind("authorization_check").execute(&mut *tx).await?;
     let granted = if consume {
-        sqlx::query("DELETE FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?")
-            .bind(KEY_INPUT.0).bind(ROUTE).bind(KEY_INPUT.1).bind(KEY_INPUT.2).bind(parameters)
-            .execute(&mut *tx).await?.rows_affected() == 1
+        grants::consume(&mut tx, KEY_INPUT.0, ROUTE, KEY_INPUT.1, KEY_INPUT.2, parameters).await?
     } else {
-        sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?)")
+        sqlx::query_scalar::<_, i64>(grants::EXACT_OR_STANDING)
             .bind(KEY_INPUT.0).bind(ROUTE).bind(KEY_INPUT.1).bind(KEY_INPUT.2).bind(parameters)
             .fetch_one(&mut *tx).await? == 1
     };
@@ -345,7 +342,7 @@ async fn authorize_conversion_and_record(database: &SqlitePool, request_id: &str
     let mut tx = database.begin().await?;
     let insert = "INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)";
     sqlx::query(insert).bind(request_id).bind(WINDOW_CONVERT.0).bind(ROUTE).bind(WINDOW_CONVERT.1).bind(WINDOW_CONVERT.2).bind(parameters).bind("authorization_check").execute(&mut *tx).await?;
-    let granted = sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?)")
+    let granted = sqlx::query_scalar::<_, i64>(grants::EXACT_OR_STANDING)
         .bind(WINDOW_CONVERT.0).bind(ROUTE).bind(WINDOW_CONVERT.1).bind(WINDOW_CONVERT.2).bind(parameters).fetch_one(&mut *tx).await? == 1;
     sqlx::query(insert).bind(request_id).bind(WINDOW_CONVERT.0).bind(ROUTE).bind(WINDOW_CONVERT.1).bind(WINDOW_CONVERT.2).bind(parameters).bind(if granted { allowed_decision } else { "denied" }).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -370,7 +367,7 @@ async fn authorize_vision_and_record(database: &SqlitePool, request_id: &str, pa
     let mut tx = database.begin().await?;
     let insert = "INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)";
     sqlx::query(insert).bind(request_id).bind(WINDOW_LOCATE.0).bind(VISION_ROUTE).bind(WINDOW_LOCATE.1).bind(WINDOW_LOCATE.2).bind(parameters).bind("authorization_check").execute(&mut *tx).await?;
-    let granted = sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?)")
+    let granted = sqlx::query_scalar::<_, i64>(grants::EXACT_OR_STANDING)
         .bind(WINDOW_LOCATE.0).bind(VISION_ROUTE).bind(WINDOW_LOCATE.1).bind(WINDOW_LOCATE.2).bind(parameters).fetch_one(&mut *tx).await? == 1;
     sqlx::query(insert).bind(request_id).bind(WINDOW_LOCATE.0).bind(VISION_ROUTE).bind(WINDOW_LOCATE.1).bind(WINDOW_LOCATE.2).bind(parameters).bind(if granted { allowed_decision } else { "denied" }).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -381,7 +378,7 @@ async fn authorize_and_record(database: &SqlitePool, request_id: &str, scope: (&
     let mut tx = database.begin().await?;
     let insert = "INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)";
     sqlx::query(insert).bind(request_id).bind(scope.0).bind(ROUTE).bind(scope.1).bind(scope.2).bind(PARAMETERS).bind("authorization_check").execute(&mut *tx).await?;
-    let granted = sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app = 'wecom' AND capability = ? AND route = ? AND target = ? AND effect = ? AND parameters = ?)")
+    let granted = sqlx::query_scalar::<_, i64>(grants::EXACT_OR_STANDING)
         .bind(scope.0).bind(ROUTE).bind(scope.1).bind(scope.2).bind(PARAMETERS).fetch_one(&mut *tx).await? == 1;
     sqlx::query(insert).bind(request_id).bind(scope.0).bind(ROUTE).bind(scope.1).bind(scope.2).bind(PARAMETERS).bind(if granted { allowed_decision } else { "denied" }).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -392,8 +389,8 @@ async fn capture_authorized(database: &SqlitePool, request_id: &str) -> Result<(
     if !authorize_and_record(database, request_id, WINDOW_CAPTURE, "grant_allowed").await.map_err(|_| InvokeError::AuditUnavailable)? {
         return Err(InvokeError::Forbidden);
     }
-    // Permission prompts are initiated only by an authorized capture request.
-    let permission = tokio::task::spawn_blocking(crate::applications::wecom::request_screen_recording_permission)
+    // OS permissions are requested once by `desk-agent setup`; dispatch only preflights and never prompts.
+    let permission = tokio::task::spawn_blocking(crate::applications::wecom::screen_recording_allowed)
         .await.map_err(|_| InvokeError::CapabilityUnavailable)?;
     if !permission {
         audit(database, request_id, WINDOW_CAPTURE, "not_dispatched_screen_recording_permission").await.map_err(|_| InvokeError::AuditUnavailable)?;
@@ -555,7 +552,7 @@ async fn invoke_task_owned(
         TaskInstruction::Perception(PerceptionInstruction::VisionDetect{ objects }) => {
             let database = database.ok_or(InvokeError::AuditUnavailable)?;
             let parameters = app_window_locate_parameters(objects).map_err(|_| InvokeError::InvalidInput)?;
-            // Disclosure authorization is required before even prompting for window capture.
+            // Disclosure authorization is required before window capture (which never prompts).
             if !authorize_vision_and_record(database, request_id, &parameters, "grant_allowed").await.map_err(|_| InvokeError::AuditUnavailable)? {
                 return Err(InvokeError::Forbidden);
             }
@@ -767,7 +764,7 @@ mod activation_authorization_tests {
     #[tokio::test]
     async fn consumption_is_single_use_and_audit_failure_rolls_back() {
         let db = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
-        sqlx::query("CREATE TABLE local_capability_grants (app TEXT, capability TEXT, route TEXT, target TEXT, effect TEXT, parameters TEXT, PRIMARY KEY(app, capability, route, target, effect, parameters))").execute(&db).await.unwrap();
+        sqlx::query("CREATE TABLE local_capability_grants (app TEXT, capability TEXT, route TEXT, target TEXT, effect TEXT, parameters TEXT, PRIMARY KEY(app, capability, route, target, effect, parameters))").execute(&db).await.unwrap(); sqlx::query(crate::runtime::grants::CREATE_TABLE).execute(&db).await.unwrap();
         sqlx::query("CREATE TABLE capability_audit (request_id TEXT, app TEXT, capability TEXT, route TEXT, target TEXT, effect TEXT, parameters TEXT, decision TEXT)").execute(&db).await.unwrap();
         let digest = app_element_activation_parameters([1.0, 2.0], "AXButton", Some("private label")).unwrap();
         sqlx::query("INSERT INTO local_capability_grants VALUES ('wecom', 'wecom.element.activate', 'macos_gui', 'main_or_single_app_window', 'activate_element', ?)").bind(&digest).execute(&db).await.unwrap();
@@ -799,7 +796,7 @@ mod activation_authorization_tests {
     #[tokio::test]
     async fn coordinate_and_named_grants_are_consumed_independently() {
         let db = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
-        sqlx::query("CREATE TABLE local_capability_grants (app TEXT, capability TEXT, route TEXT, target TEXT, effect TEXT, parameters TEXT, PRIMARY KEY(app, capability, route, target, effect, parameters))").execute(&db).await.unwrap();
+        sqlx::query("CREATE TABLE local_capability_grants (app TEXT, capability TEXT, route TEXT, target TEXT, effect TEXT, parameters TEXT, PRIMARY KEY(app, capability, route, target, effect, parameters))").execute(&db).await.unwrap(); sqlx::query(crate::runtime::grants::CREATE_TABLE).execute(&db).await.unwrap();
         sqlx::query("CREATE TABLE capability_audit (request_id TEXT, app TEXT, capability TEXT, route TEXT, target TEXT, effect TEXT, parameters TEXT, decision TEXT)").execute(&db).await.unwrap();
         let named = app_element_activation_parameters([1.0, 2.0], "AXCell", Some("message")).unwrap();
         let coordinate = app_element_activation_parameters([1.0, 2.0], "AXCell", None).unwrap();
@@ -881,7 +878,7 @@ mod text_input_authorization_tests {
 
     async fn database() -> SqlitePool {
         let db = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
-        sqlx::query("CREATE TABLE local_capability_grants (app TEXT, capability TEXT, route TEXT, target TEXT, effect TEXT, parameters TEXT, PRIMARY KEY(app, capability, route, target, effect, parameters))").execute(&db).await.unwrap();
+        sqlx::query("CREATE TABLE local_capability_grants (app TEXT, capability TEXT, route TEXT, target TEXT, effect TEXT, parameters TEXT, PRIMARY KEY(app, capability, route, target, effect, parameters))").execute(&db).await.unwrap(); sqlx::query(crate::runtime::grants::CREATE_TABLE).execute(&db).await.unwrap();
         sqlx::query("CREATE TABLE capability_audit (request_id TEXT, app TEXT, capability TEXT, route TEXT, target TEXT, effect TEXT, parameters TEXT, decision TEXT)").execute(&db).await.unwrap();
         db
     }

@@ -8,7 +8,7 @@
     "step_id": { "type": "string", "minLength": 1 },
     "sequence": { "type": "integer", "minimum": 0 },
     "attempt": { "type": "integer", "minimum": 1 },
-    "instruction": { "$ref": "https://wecom-use.local/schemas/task-instruction-v2.json", "description": "Original exact instruction, including sensitive caller-supplied parameters. send_message_by_nickname preserves nickname, ordered typed messages and interval_ms for the authorized caller. Complete responses must not enter ordinary logs/audit." },
+    "instruction": { "$ref": "https://wecom-use.local/schemas/task-instruction-v2.json", "description": "Original exact instruction, including sensitive caller-supplied parameters. send_message_by_nickname preserves ordered typed messages and attachment path, original filename and declared MIME for the authorized caller. Complete responses must not enter ordinary logs/audit." },
     "status": { "$ref": "https://wecom-use.local/schemas/execution-status-v1.json" },
     "verification": {
       "type": "object",
@@ -96,6 +96,17 @@
               "message_observed": { "type": "boolean" }
             }
           }
+        },
+        "queue": {
+          "type": "object", "additionalProperties": false,
+          "required": ["batch_id", "merged_requests", "batch_position", "message_offset"],
+          "properties": {
+            "batch_id": { "type": "string" },
+            "merged_requests": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "batch_position": { "type": "integer", "minimum": 0, "maximum": 99 },
+            "message_offset": { "type": "integer", "minimum": 0, "maximum": 99 }
+          },
+          "description": "Present when the request ran through the SQLite instruction queue. Same-app exact-nickname pending requests enqueued within the configured window after the consumed head are merged into one dispatch; this output is projected onto this request's own message range and re-indexed from zero. Merging never changes message text or order and does not authorize retries."
         },
         "completed_count": { "type": "integer", "minimum": 0, "maximum": 100 },
         "unknown_index": { "type": ["integer", "null"], "minimum": 0, "maximum": 99 },

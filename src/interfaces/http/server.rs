@@ -1,5 +1,6 @@
 use crate::applications::wecom::{send_message_by_nickname_capability, app_element_input_capability, app_element_focus_capability, keyboard_key_input_capability, app_element_activation_capability, app_window_capture_capability, center_capability, center_wecom_window, launch_wecom};
 use crate::interfaces::ipc::{self, IpcRequest, IpcResponse};
+use crate::runtime::queue::InstructionQueue;
 use crate::kernel::task::{
     TaskError, TaskErrorCode, TaskErrorResponse, TaskPreflightError, TaskRequest, TaskResponse,
 };
@@ -125,7 +126,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
     let center_available = matches!(center.status, CapabilityStatus::Available) && authorization == Some(true);
     let center_reason = match authorization {
         None => Some("Authorization storage is unavailable"),
-        Some(false) => Some("Window centering is not explicitly authorized"),
+        Some(false) => Some("Window centering is not authorized; run desk-agent setup"),
         Some(true) => center.reason,
     };
     let capture = app_window_capture_capability();
@@ -136,7 +137,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
     let capture_available = matches!(capture.status, CapabilityStatus::Available) && capture_grant == Some(true);
     let capture_reason = match capture_grant {
         None => Some("Authorization storage is unavailable"),
-        Some(false) => Some("App window capture is not explicitly authorized"),
+        Some(false) => Some("App window capture is not authorized; run desk-agent setup"),
         Some(true) => capture.reason,
     };
     // The same native window/permission prerequisites are used by capture-record
@@ -148,7 +149,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
     let conversion_available = matches!(capture.status, CapabilityStatus::Available) && conversion_grant == Some(true);
     let conversion_reason = match conversion_grant {
         None => Some("Authorization storage is unavailable"),
-        Some(false) => Some("No exact app window coordinate conversion grant exists"),
+        Some(false) => Some("No install-time standing grant or exact app window coordinate conversion grant exists; run desk-agent setup"),
         Some(true) => capture.reason,
     };
     // Discovery is advisory: it does not inspect a caller's point or target.
@@ -160,7 +161,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
     let activation_available = matches!(activation.status, CapabilityStatus::Available) && activation_grant == Some(true);
     let activation_reason = match activation_grant {
         None => Some("Authorization storage is unavailable"),
-        Some(false) => Some("No one-shot app element activation grant exists"),
+        Some(false) => Some("No install-time standing grant or one-shot app element activation grant exists; run desk-agent setup"),
         Some(true) => activation.reason,
     };
     let focus = app_element_focus_capability();
@@ -171,7 +172,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
     let focus_available = matches!(focus.status, CapabilityStatus::Available) && focus_grant == Some(true);
     let focus_reason = match focus_grant {
         None => Some("Authorization storage is unavailable"),
-        Some(false) => Some("No one-shot app element focus grant exists"),
+        Some(false) => Some("No install-time standing grant or one-shot app element focus grant exists; run desk-agent setup"),
         Some(true) => focus.reason,
     };
     let diagnosis_grant = match state.security_database.as_deref() {
@@ -181,7 +182,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
     let diagnosis_available = matches!(activation.status, CapabilityStatus::Available) && diagnosis_grant == Some(true);
     let diagnosis_reason = match diagnosis_grant {
         None => Some("Authorization storage is unavailable"),
-        Some(false) => Some("No exact app element diagnosis grant exists"),
+        Some(false) => Some("No install-time standing grant or exact app element diagnosis grant exists; run desk-agent setup"),
         Some(true) => activation.reason,
     };
     let element_input = app_element_input_capability();
@@ -192,7 +193,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
     let element_input_available = matches!(element_input.status, CapabilityStatus::Available) && element_input_grant == Some(true);
     let element_input_reason = match element_input_grant {
         None => Some("Authorization storage is unavailable"),
-        Some(false) => Some("No one-shot exact app element input grant exists"),
+        Some(false) => Some("No install-time standing grant or one-shot exact app element input grant exists; run desk-agent setup"),
         Some(true) => element_input.reason,
     };
     let key_input = keyboard_key_input_capability();
@@ -203,7 +204,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
     let key_input_available = matches!(key_input.status, CapabilityStatus::Available) && key_input_grant == Some(true);
     let key_input_reason = match key_input_grant {
         None => Some("Authorization storage is unavailable"),
-        Some(false) => Some("No one-shot exact key input grant exists"),
+        Some(false) => Some("No install-time standing grant or one-shot exact key input grant exists; run desk-agent setup"),
         Some(true) => key_input.reason,
     };
     let nickname_send = send_message_by_nickname_capability();
@@ -220,7 +221,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
     let nickname_send_available = nickname_native_and_grant;
     let nickname_send_reason = match nickname_send_grant {
         None => Some("Authorization storage is unavailable"),
-        Some(false) => Some("No one-shot WeCom send-by-nickname parent grant exists"),
+        Some(false) => Some("No install-time standing grant or one-shot WeCom send-by-nickname parent grant exists; run desk-agent setup"),
         Some(true) if !matches!(nickname_send.status, CapabilityStatus::Available) => nickname_send.reason,
         Some(true) => None,
     };
@@ -265,13 +266,18 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
                                     "nickname": { "type": "string", "minLength": 1, "maxLength": 256, "allOf": [{ "pattern": "\\S" }, { "not": { "pattern": "[\\u0000-\\u001f\\u007f-\\u009f]" } }], "description": "Exact nonblank control-free nickname, 1..256 UTF-8 bytes; preserve all original values" },
                                     "messages": {
                                         "type": "array", "minItems": 1, "maxItems": 100,
-                                        "items": {
-                                            "type": "object", "additionalProperties": false, "required": ["type", "content"],
-                                            "properties": {
+                                        "items": { "oneOf": [
+                                            { "type": "object", "additionalProperties": false, "required": ["type", "content"], "properties": {
                                                 "type": { "const": "text" },
-                                                "content": { "type": "string", "minLength": 1, "maxLength": 256, "allOf": [{ "pattern": "\\S" }, { "not": { "pattern": "[\\u0000-\\u001f\\u007f-\\u009f]" } }], "description": "Exact nonblank control-free text, 1..256 UTF-8 bytes" }
-                                            }
-                                        }
+                                                "content": { "type": "string", "minLength": 1, "maxLength": 256, "allOf": [{ "pattern": "\\S" }, { "not": { "pattern": "[\\u0000-\\u001f\\u007f-\\u009f]" } }] }
+                                            } },
+                                            { "type": "object", "additionalProperties": false, "required": ["type", "path", "filename", "mime_type"], "properties": {
+                                                "type": { "enum": ["image", "file"] },
+                                                "path": { "type": "string", "maxLength": 4096, "pattern": "^/" },
+                                                "filename": { "type": "string", "minLength": 1, "maxLength": 255, "description": "Exact basename; nonblank, control-free, no slashes; maximum 255 UTF-8 bytes" },
+                                                "mime_type": { "type": "string", "maxLength": 127, "pattern": "^[a-z0-9!#$%&'+.^_`|~-]+/[a-z0-9!#$%&'+.^_`|~-]+$" }
+                                            }, "allOf": [{ "if": { "properties": { "type": { "const": "image" } } }, "then": { "properties": { "mime_type": { "enum": ["image/png", "image/jpeg"] } } } }] }
+                                        ], "description": "Images up to 20 MiB, files up to 100 MiB, total 200 MiB; runtime checks bytes and immutable snapshots. File MIME is declared metadata, not type proof." }
                                     },
                                     "interval_ms": { "type": "integer", "minimum": 0, "maximum": 60000, "description": "Wait only between completed sends; (messages.length - 1) * interval_ms <= 600000" }
                                 }
@@ -290,14 +296,16 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
                     available,
                     required_scopes: vec![scope],
                     channels: vec!["gui", "local_vision"],
-                    risk: "High-risk external-message transmission: launch and center, navigate/search a unique exact nickname and send each authorized text once in order; stop on any failure or unknown effect and never resend",
-                    confirmation: "Separate explicit single-use parent wecom.message.send_by_nickname grant binds app wecom, route macos_gui, target exact_nickname_conversation, effect send_text_messages and fixed parameters instruction:send_message_by_nickname:v1 independent of all call parameters; content-bound digest grants cannot authorize this instruction and are not converted or automatically regranted; send-by-nickname-v1-sha256 over compact UTF-8 serde struct fields nickname,messages,interval_ms in that order is immutable request audit/delegation/revocation identity only; atomically check and consume with intent before any launch; recheck exact immutable current-request digest/lease and app/route/action restrictions before each child without per-child approval, ambient or minted broad child grants",
+                    risk: "High-risk external-message transmission; clipboard exposes attachments to local applications. Validate preview before sending; stop on failure or unknown effect, never resend. Native media and real sends have not been verified.",
+                    confirmation: "Install-time standing grant from desk-agent setup (never consumed, revocable) or separate explicit single-use parent wecom.message.send_by_nickname grant binds app wecom, route macos_gui, target exact_nickname_conversation, effect send_messages and fixed parameters instruction:send_message_by_nickname:v2 independent of all call parameters; content-bound digest grants cannot authorize this instruction and are not converted or automatically regranted; send-by-nickname-v2-sha256 over compact UTF-8 serde struct fields nickname,messages,interval_ms in that order is immutable request audit/delegation/revocation identity only; atomically check and consume with intent before any launch; recheck exact immutable current-request digest/lease and app/route/action restrictions before each child without per-child approval, ambient or minted broad child grants",
                     verification: "Mandatory process_launch then window_center and real measurement before phase-specific private SQLite navigation/search/contact/composer lookup; stable geometry keys exclude PID/window identities, which must pass live guards; true cache_hits flags require live-validated reuse, not candidate matches; every screenshot is the whole WeCom window including anchored child windows; exact-nickname contact candidates require a fresh ContactCapture, unique ordinary-contact AX identity and original-binding checks before dispatch, with vision/conversion only for missing or stale points; ordered submitted/message_observed outcomes retain completed_count/cache_hits/unknown_index on stopped unknown TaskResponse; progress retains enclosing phase, fixed operation, nullable message_index, completed|stopped status and null|authorization|audit|operation|postcondition failure; required nullable contact_diagnostic covers contact capture/readiness, local inference, conversion prechecks and exact_contact failures, null outside contact failures and retained across final audit failure; {dispatch:not_dispatched|dispatched|unknown,code:fixed sanitized identifier} describes only contact click, never prior parent effects; proven pre-click failures including readiness timeout remain not_dispatched, never permit retry or change parent unknown; unexpected errors use contact_operation_failed, with not_dispatched for read-only pre-click operations and unknown only for possible contact-click dispatch; codes are contact_target_unavailable,input_monitoring_unavailable,input_preparation_failed,contact_target_changed,window_unavailable,window_changed,focus_lost,opacity_changed,window_list_unavailable,search_popup_still_visible,input_route_unconfirmed,conversation_header_unconfirmed,input_monitoring_lost,contact_operation_failed,main_window_unavailable,main_window_not_frontmost,search_focus_unavailable,search_geometry_unavailable,search_anchor_unavailable,search_query_mismatch,popup_unavailable,popup_tree_unavailable,contact_result_unavailable,contact_cell_unavailable,contact_cell_window_mismatch,contact_cell_geometry_unavailable,contact_hit_test_unavailable,contact_hit_mismatch,contact_point_outside,contact_capture_unavailable,contact_capture_changed,contact_capture_record_unavailable; timeout retains latest concrete typed reason; no raw OS/AX errors, nickname, text or coordinates; message_states covers every requested message as not_started|preparing|submission_unknown|observed; local evidence is not delivery/read receipt and independent verification remains not_performed; never blindly retry",
                     prerequisites: vec![
+                        "Attachments require absolute local paths of at most 4096 UTF-8 bytes, original basename and concrete MIME without wildcards; sources must be nonempty regular files, not directories or symlinks; PNG/JPEG images only, arbitrary syntactically valid declared MIME for files; maximum 20 MiB per image, 100 MiB per file and 200 MiB total",
+                        "Clipboard media may be exposed to local applications; validate attachment preview. Navigation screenshot counts describe localization only; attachments can require additional observations",
                         "macOS, Accessibility/Input Monitoring/Screen Recording permissions and supported WeCom GUI",
                         "ScreenCaptureKit whole app-window capture APIs (macOS 14.2+), exact window ID/PID selection, child windows kept so the anchored popup is inside the app-window image, no shadows/cursor, actual point/pixel scale, at most 15 seconds asynchronous screenshot wait; API availability is read-only",
                         "Explicitly absent/empty AXTitle and AXValue are nonmatching placeholders, not contact/section/BOT identity; nonempty titles remain authoritative, invalid types and AX read failures fail closed",
-                        "Usable authorization/audit storage and a matching independent one-shot parent grant; standalone child grants do not substitute",
+                        "Usable authorization/audit storage and a matching install-time standing or independent one-shot parent grant; standalone child grants do not substitute",
                         "Always process_launch then window_center before cache lookup, including already running/centered clients",
                         "SQLite stores one main-window-relative logical point per global row and one popup-relative logical candidate per instruction_content row; keys bind app/route/control/layout version, display bounds, main logical size and actual capture pixels, plus exact-nickname digest and popup dimensions/offset for contact candidates; no durable PID/window identity and no plaintext nickname/messages",
                         "Existing same-user private security storage; unique index/UPSERT, 192 global and 1024 content rows, least-recently-successfully-validated eviction, 60-second validation touch throttling, no second memory cache; cache-only failures may degrade to real localization but never bypass authorization/audit or replay input",
@@ -308,7 +316,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
                         "Fixed contact diagnostic codes include contact_result_ambiguous, contact_result_bot, contact_section_unavailable; ambiguous exact results, bot results or an unconfirmed ordinary-contact section fail before contact click",
                         "Cache state is unknown during discovery; local vision is required only when any missing or stale coordinate, including contact_result, needs localization; unavailable required vision stops execution, without promising hits",
                         "Unique exact ordinary-contact nickname result and live AX identity, focus/editor, ordered key routing and newly appended message evidence",
-                        "Only 1..100 text messages, 1..256 UTF-8 bytes each; interval 0..60000ms with total delay <=600000ms; standalone exact WeCom instruction only",
+                        "Only 1..100 messages; text is 1..256 UTF-8 bytes each; interval 0..60000ms with total delay <=600000ms; standalone exact WeCom instruction only",
                     ],
                     unavailable_reason: if available { None } else { Some(reason.unwrap_or("Capability unavailable")) },
                 };
@@ -374,7 +382,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
             required_scopes: if action == "vision_detect" { vec!["desktop.window.capture", scope] } else { vec![scope] },
             channels: if action == "vision_detect" { vec!["gui", "local_vision"] } else { vec!["gui"] },
             risk: if action == "keyboard_text_input" { "Replaces the complete value of the selected editable field, potentially including a draft; no Enter or message send" } else if action == "keyboard_key_input" { "Dispatches exactly one preallocated zero-modifier Return key-down/up pair in the current focus context, which may trigger an application action such as sending; no text, focus change, shortcut, other key or retry" } else if action == "ax_inspect" { "Reads the live accessibility element at the specified point without activating it; coordinate-only mode does not establish message identity" } else if action == "click_button" { "Clicks the specified WeCom element and may cause an external effect; coordinate-only mode does not establish message identity" } else if action == "click_focus" { "Clicks the specified WeCom element once and shifts keyboard focus to it, which may change subsequent input destination; coordinate-only mode does not establish message identity" } else if action == "vision_detect" { "Captures sensitive WeCom window content and discloses it to the local vision service" } else if action == "screenshot_coordinates_convert" { "Reads capture-time WeCom window geometry; coordinates are snapshots, not authorization to act" } else if action == "window_center" { "Moves an existing WeCom window without resizing" } else if action == "window_capture" { "Captures sensitive WeCom window content to a private local file" } else { "No risk policy is implemented" },
-            confirmation: if action == "keyboard_text_input" { "Separate one-shot desktop.element.input grant bound to exact point and text with element-input-v1-sha256; search, key and draft grants do not authorize this action" } else if action == "keyboard_key_input" { "Separate explicit one-shot local desktop.keyboard.key_input grant for route macos_gui, target main_or_single_app_window, effect key_input and key-input-v1-sha256: over compact UTF-8 JSON in key,modifiers order; text-input, click, focus and draft-send grants cannot authorize this action; the model and catalog cannot authorize a request" } else if action == "ax_inspect" { "Separate explicit local grant for the exact point, role and optional label, including null, required; coordinate-only mode requires independent caller screenshot review and approval of the exact point/role; the model and catalog cannot authorize a request" } else if action == "click_button" { "Explicit one-shot local grant for the exact point, role and optional label, including null, required; coordinate-only mode requires independent caller screenshot review and approval of the exact point/role; the model and catalog cannot authorize a request" } else if action == "click_focus" { "Separate explicit one-shot local desktop.element.focus grant for the exact point, role and optional label, including null, with focus-v1-sha256; click and input grants cannot authorize this action; the model and catalog cannot authorize a request" } else if action == "vision_detect" { "Separate explicit local capture and exact object-list vision grants required" } else if action == "screenshot_coordinates_convert" { "Explicit local grant for the exact capture ID and boxes required; catalog availability does not authorize a particular request" } else if action == "window_center" || action == "window_capture" { "Explicit local grant required" } else { "No confirmation policy is implemented" },
+            confirmation: if action == "keyboard_text_input" { "Install-time standing grant from desk-agent setup (never consumed, revocable), or: Separate one-shot desktop.element.input grant bound to exact point and text with element-input-v1-sha256; search, key and draft grants do not authorize this action" } else if action == "keyboard_key_input" { "Install-time standing grant from desk-agent setup (never consumed, revocable), or: Separate explicit one-shot local desktop.keyboard.key_input grant for route macos_gui, target main_or_single_app_window, effect key_input and key-input-v1-sha256: over compact UTF-8 JSON in key,modifiers order; text-input, click, focus and draft-send grants cannot authorize this action; the model and catalog cannot authorize a request" } else if action == "ax_inspect" { "Install-time standing grant from desk-agent setup (never consumed, revocable), or: Separate explicit local grant for the exact point, role and optional label, including null, required; coordinate-only mode requires independent caller screenshot review and approval of the exact point/role; the model and catalog cannot authorize a request" } else if action == "click_button" { "Install-time standing grant from desk-agent setup (never consumed, revocable), or: Explicit one-shot local grant for the exact point, role and optional label, including null, required; coordinate-only mode requires independent caller screenshot review and approval of the exact point/role; the model and catalog cannot authorize a request" } else if action == "click_focus" { "Install-time standing grant from desk-agent setup (never consumed, revocable), or: Separate explicit one-shot local desktop.element.focus grant for the exact point, role and optional label, including null, with focus-v1-sha256; click and input grants cannot authorize this action; the model and catalog cannot authorize a request" } else if action == "vision_detect" { "Install-time standing grant from desk-agent setup (never consumed, revocable), or: Separate explicit local capture and exact object-list vision grants required" } else if action == "screenshot_coordinates_convert" { "Install-time standing grant from desk-agent setup (never consumed, revocable), or: Explicit local grant for the exact capture ID and boxes required; catalog availability does not authorize a particular request" } else if action == "window_center" || action == "window_capture" { "Install-time standing grant from desk-agent setup (never consumed, revocable), or: Explicit local grant required" } else { "No confirmation policy is implemented" },
             verification: if action == "keyboard_text_input" { "Revalidates the stable target and focused field and reads back the exact value; adapter evidence is not independent verification" } else if action == "keyboard_key_input" { "Requires a stable unique frontmost opaque window and passive per-process observation of this request's exact correlated Return key-down then key-up pair (matching tag, PID, keycode and zero flags) within 500ms; success means only that the pair was routed, not that the application processed it; verification remains not_performed and any failure after posting is unknown without retry" } else if action == "ax_inspect" { "Reports whether the read-only preflight matched at inspection time; does not authorize later activation or establish message identity in coordinate-only mode" } else if action == "click_button" { "Requires a stable target and either an actual AXFocused/AXSelected false-to-true transition or passive per-process observation of this click's exact correlated mouse-down then mouse-up pair (matching tag, PID, point, left button, zero flags and click count one); unchanged focus alone is insufficient; unavailable tap falls back only to transition evidence; no retries, extra focus writes or relaxed window/overlay guards; routing is not app semantic processing or independent verification, so verification remains not_performed; coordinate-only mode does not establish message identity" } else if action == "click_focus" { "Requires a stable target, the correlated mouse-down/up pair routed to the target process, and the application's AXFocusedUIElement exactly matching the clicked element with AXFocused true within 500ms; focus is observed, never written through AX; no retry or second click; this is local UI evidence, so verification remains not_performed" } else { "Independent verification is not implemented" },
             prerequisites: if action == "keyboard_text_input" { vec!["macOS and Accessibility permission", "Unique frontmost WeCom main window and live editable text field at the exact point", "Readable and writable value and writable focus", "Separate one-shot exact point and text grant"] } else if action == "keyboard_key_input" { vec!["macOS", "Accessibility permission and Input Monitoring for passive key routing evidence", "Exactly one running WeCom process with a main or sole frontmost opaque window", "Focus is already on the intended target; key input never sets or changes focus", "Exactly one preallocated zero-modifier Return pair; no other key or modifier", "Separate one-shot exact key-input grant; catalog availability is advisory"] } else if action == "ax_inspect" { vec!["macOS", "Accessibility permission", "Exactly one running WeCom process with a main or sole window", "Global macOS top-left screen logical point within the frontmost unobstructed WeCom window and a matching live accessibility element", "Explicit exact inspection grant"] } else if action == "click_button" { vec!["macOS", "Accessibility permission", "Exactly one running WeCom process with a main or sole window", "Global macOS top-left screen logical point within the frontmost unobstructed WeCom window and a matching live accessibility element", "Explicit one-shot exact click grant"] } else if action == "click_focus" { vec!["macOS", "Accessibility permission and Input Monitoring for passive click routing evidence", "Exactly one running WeCom process with a main or sole window", "Global macOS top-left screen logical point within the frontmost unobstructed WeCom window and a matching live accessibility element", "Target must accept keyboard focus and report itself through AXFocusedUIElement", "Explicit one-shot exact focus grant"] } else if action == "screenshot_coordinates_convert" { vec!["macOS", "A recent recorded app window capture with unchanged target and geometry", "Accessibility permission", "Screen recording permission already granted", "Explicit exact conversion grant"] } else if action == "vision_detect" { vec!["macOS", "Exactly one running WeCom process with a main or sole window", "Accessibility permission", "Screen recording permission", "Explicit app window capture grant", "Explicit vision.window.locate grant for the exact object list", "Local vision service at http://127.0.0.1/v1/chat/completions with model wevisone-vl-4b"] } else if action == "process_launch" { vec!["macOS", "Installed WeCom desktop application"] } else if action == "window_center" { vec!["macOS", "Running WeCom with a controllable window", "Accessibility permission", "Explicit local grant"] } else if action == "window_capture" { vec!["macOS", "Exactly one running WeCom process with a main or sole window", "Accessibility permission", "Screen recording permission", "Explicit app window capture grant"] } else { vec![] },
             unavailable_reason: if available { None } else { Some(reason.unwrap_or("Capability unavailable")) },
@@ -383,7 +391,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<CapabilityCatalog> 
     })
 }
 
-async fn execute_ipc_task(request: TaskRequest, database: Option<&SqlitePool>) -> IpcResponse {
+async fn execute_ipc_task(request: TaskRequest, database: Option<&SqlitePool>, queue: Option<&InstructionQueue>) -> IpcResponse {
     let input = match request.into_task_input() {
         Ok(input) => input,
         Err(error) => {
@@ -411,7 +419,7 @@ async fn execute_ipc_task(request: TaskRequest, database: Option<&SqlitePool>) -
     let app = input.app().to_owned();
     let instruction = input.resolve_instruction().expect("preflight resolves supported input");
     let request_id = uuid::Uuid::new_v4().to_string();
-    match invoke_task(database, &request_id, input, launch_wecom, center_wecom_window).await {
+    match super::rpa::run_task(queue, database, &request_id, input).await {
         Ok((_, result)) => {
             let output = if let Some(output) = result {
                 output
@@ -448,7 +456,7 @@ fn ipc_task_error_with_id(code: TaskErrorCode, message: &'static str, request_id
     )))
 }
 
-async fn run_ipc(path: PathBuf, database: SqlitePool, security_database: Option<Arc<SqlitePool>>) -> anyhow::Result<()> {
+async fn run_ipc(path: PathBuf, database: SqlitePool, security_database: Option<Arc<SqlitePool>>, queue: Option<Arc<InstructionQueue>>) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -470,6 +478,7 @@ async fn run_ipc(path: PathBuf, database: SqlitePool, security_database: Option<
         }
         let database = database.clone();
         let security_database = security_database.clone();
+        let queue = queue.clone();
         tokio::spawn(async move {
             let read = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 let length = stream.read_u32().await? as usize;
@@ -493,7 +502,7 @@ async fn run_ipc(path: PathBuf, database: SqlitePool, security_database: Option<
                     available: database::ping(&database).await.is_ok(),
                     version: env!("CARGO_PKG_VERSION").to_owned(),
                 },
-                Ok(IpcRequest::Rpa(request)) => execute_ipc_task(request, security_database.as_deref()).await,
+                Ok(IpcRequest::Rpa(request)) => execute_ipc_task(request, security_database.as_deref(), queue.as_deref()).await,
                 Err(_) => ipc_task_error(TaskErrorCode::InvalidRequest, "Invalid IPC request."),
             };
             let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -507,7 +516,7 @@ async fn run_ipc(path: PathBuf, database: SqlitePool, security_database: Option<
         });
     }
 }
-fn build_router(state: AppState, credential: Option<Arc<super::local_auth::LocalCredential>>) -> Router {
+fn build_router(state: AppState, credential: Option<Arc<super::local_auth::LocalCredential>>, queue: Option<Arc<InstructionQueue>>) -> Router {
     let security_database = state.security_database.clone();
     Router::new()
         .route("/api/v2/health", get(health))
@@ -516,20 +525,19 @@ fn build_router(state: AppState, credential: Option<Arc<super::local_auth::Local
         .merge(super::rpa::routes().with_state::<AppState>(()))
         .with_state(state)
         .layer(axum::Extension(security_database))
+        .layer(axum::Extension(queue))
         .layer(axum::Extension(credential))
 }
 
 pub async fn serve() -> anyhow::Result<()> {
     init();
     let config = RuntimeConfig::from_env()?;
-    let database = database::open(&config.database_url).await?;
-    let security_database = match database::open_security(&config.security_database_path).await {
-        Ok(pool) => Some(Arc::new(pool)),
-        Err(_) => {
-            tracing::warn!("private authorization/audit storage unavailable; window centering is disabled");
-            None
-        }
-    };
+    if database::adopt_legacy(&config.database_path, config.legacy_database_path.as_deref())? {
+        tracing::info!("legacy private database adopted as the single project database");
+    }
+    // One private project database holds every table (grants, audit, cache, queue, metadata).
+    let database = database::open(&config.database_path).await?;
+    let security_database = Some(Arc::new(database.clone()));
     let credential = match super::local_auth::LocalCredential::load_or_create() {
         Ok(value) => Some(Arc::new(value)),
         Err(_) => {
@@ -537,11 +545,30 @@ pub async fn serve() -> anyhow::Result<()> {
             None
         }
     };
+    // The queue lives in the private project database: queued payloads may contain message text.
+    let queue = match &security_database {
+        Some(pool) => {
+            let executor_db = Arc::clone(pool);
+            let executor: crate::runtime::queue::Executor = Arc::new(move |request_id, input| {
+                let db = Arc::clone(&executor_db);
+                Box::pin(async move { invoke_task(Some(&db), &request_id, input, launch_wecom, center_wecom_window).await })
+            });
+            match InstructionQueue::start((**pool).clone(), config.queue, executor).await {
+                Ok(queue) => Some(queue),
+                Err(_) => {
+                    tracing::warn!("instruction queue storage unavailable; tasks use the direct Runtime invoker");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
     let ipc_path = config.socket_path.clone();
     let ipc_database = database.clone();
     let ipc_security_database = security_database.clone();
-    let ipc_task = tokio::spawn(async move { run_ipc(ipc_path, ipc_database, ipc_security_database).await });
-    let app = build_router(AppState { database, security_database }, credential);
+    let ipc_queue = queue.clone();
+    let ipc_task = tokio::spawn(async move { run_ipc(ipc_path, ipc_database, ipc_security_database, ipc_queue).await });
+    let app = build_router(AppState { database, security_database }, credential, queue);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     tracing::info!(addr = %config.bind, "runtime listening");
     axum::serve(listener, app)
@@ -614,7 +641,7 @@ mod protocol_transport_tests {
     async fn production_router_exposes_only_version_two_and_authenticates_execution() {
         let database = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1).connect("sqlite::memory:").await.unwrap();
-        let app = build_router(AppState { database, security_database: None }, None);
+        let app = build_router(AppState { database, security_database: None }, None, None);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -664,7 +691,7 @@ mod protocol_transport_tests {
         let request: TaskRequest = serde_json::from_value(serde_json::json!({
             "protocol_version":"1", "app":"wecom", "instructions":[{"action":"process_launch"}],
         })).unwrap();
-        let response = serde_json::to_value(execute_ipc_task(request, None).await).unwrap();
+        let response = serde_json::to_value(execute_ipc_task(request, None, None).await).unwrap();
         assert_eq!(response["error"]["code"], "unsupported_version");
         assert_eq!(response["error"]["outcome"], "not_dispatched");
         assert_eq!(response["error"]["retryable"], false);
@@ -678,7 +705,7 @@ mod nickname_send_catalog_tests {
     #[tokio::test]
     async fn nickname_catalog_rejects_wrong_scope_and_legacy_content_bound_grants() {
         let db = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
-        sqlx::query("CREATE TABLE local_capability_grants (app TEXT, capability TEXT, route TEXT, target TEXT, effect TEXT, parameters TEXT)").execute(&db).await.unwrap();
+        sqlx::query("CREATE TABLE local_capability_grants (app TEXT, capability TEXT, route TEXT, target TEXT, effect TEXT, parameters TEXT)").execute(&db).await.unwrap(); sqlx::query(crate::runtime::grants::CREATE_TABLE).execute(&db).await.unwrap();
         let state = AppState { database: db.clone(), security_database: Some(Arc::new(db.clone())) };
         let Json(catalog) = capabilities(State(state.clone())).await;
         let entry = catalog.capabilities.iter().find(|entry| entry.instruction_action == "send_message_by_nickname").unwrap();
@@ -686,12 +713,11 @@ mod nickname_send_catalog_tests {
         assert_eq!(entry.capability_id, "wecom.message.send_by_nickname");
         assert_eq!(entry.required_scopes, ["wecom.message.send_by_nickname"]);
         assert_eq!(entry.channels, ["gui", "local_vision"]);
-        assert_eq!(entry.unavailable_reason, Some("No one-shot WeCom send-by-nickname parent grant exists"));
+        assert_eq!(entry.unavailable_reason, Some("No install-time standing grant or one-shot WeCom send-by-nickname parent grant exists; run desk-agent setup"));
         let params = &entry.input_schema.as_ref().unwrap()["properties"]["params"];
         assert_eq!(params["required"], serde_json::json!(["nickname", "messages", "interval_ms"]));
         assert_eq!(params["additionalProperties"], false);
-        assert_eq!(params["properties"]["messages"]["items"]["additionalProperties"], false);
-        assert_eq!(params["properties"]["messages"]["items"]["properties"]["type"]["const"], "text");
+        assert_eq!(params["properties"]["messages"]["items"]["oneOf"].as_array().unwrap().len(), 2);
         assert_eq!(
             entry.expected_result.as_ref().unwrap()["cache_hits"],
             serde_json::json!({
@@ -699,22 +725,23 @@ mod nickname_send_catalog_tests {
                 "contact_result": false,
             }),
         );
-        let valid_marker = "instruction:send_message_by_nickname:v1".to_owned();
+        let valid_marker = "instruction:send_message_by_nickname:v2".to_owned();
         for (app, capability, route, target, effect, parameters) in [
             ("wecom", "desktop.keyboard.key_input", "macos_gui", "main_or_single_app_window", "key_input", valid_marker.clone()),
-            ("other", "wecom.message.send_by_nickname", "macos_gui", "exact_nickname_conversation", "send_text_messages", valid_marker.clone()),
-            ("wecom", "wecom.message.send_by_nickname", "other", "exact_nickname_conversation", "send_text_messages", valid_marker.clone()),
-            ("wecom", "wecom.message.send_by_nickname", "macos_gui", "other", "send_text_messages", valid_marker.clone()),
+            ("other", "wecom.message.send_by_nickname", "macos_gui", "exact_nickname_conversation", "send_messages", valid_marker.clone()),
+            ("wecom", "wecom.message.send_by_nickname", "other", "exact_nickname_conversation", "send_messages", valid_marker.clone()),
+            ("wecom", "wecom.message.send_by_nickname", "macos_gui", "other", "send_messages", valid_marker.clone()),
             ("wecom", "wecom.message.send_by_nickname", "macos_gui", "exact_nickname_conversation", "other", valid_marker),
-            ("wecom", "wecom.message.send_by_nickname", "macos_gui", "exact_nickname_conversation", "send_text_messages", format!("send-by-nickname-v1-sha256:{}", "a".repeat(64))),
-            ("wecom", "wecom.message.send_by_nickname", "macos_gui", "exact_nickname_conversation", "send_text_messages", format!("send-by-nickname-v1-sha256:{}", "A".repeat(64))),
-            ("wecom", "wecom.message.send_by_nickname", "macos_gui", "exact_nickname_conversation", "send_text_messages", format!("send-by-nickname-v1-sha256:{}", "a".repeat(63))),
+            ("wecom", "wecom.message.send_by_nickname", "macos_gui", "exact_nickname_conversation", "send_text_messages", "instruction:send_message_by_nickname:v1".to_owned()),
+            ("wecom", "wecom.message.send_by_nickname", "macos_gui", "exact_nickname_conversation", "send_messages", format!("send-by-nickname-v2-sha256:{}", "a".repeat(64))),
+            ("wecom", "wecom.message.send_by_nickname", "macos_gui", "exact_nickname_conversation", "send_messages", format!("send-by-nickname-v2-sha256:{}", "A".repeat(64))),
+            ("wecom", "wecom.message.send_by_nickname", "macos_gui", "exact_nickname_conversation", "send_messages", format!("send-by-nickname-v2-sha256:{}", "a".repeat(63))),
         ] {
             sqlx::query("INSERT INTO local_capability_grants VALUES (?, ?, ?, ?, ?, ?)").bind(app).bind(capability).bind(route).bind(target).bind(effect).bind(parameters).execute(&db).await.unwrap();
             let Json(catalog) = capabilities(State(state.clone())).await;
             let entry = catalog.capabilities.iter().find(|entry| entry.instruction_action == "send_message_by_nickname").unwrap();
             assert!(!entry.available);
-            assert_eq!(entry.unavailable_reason, Some("No one-shot WeCom send-by-nickname parent grant exists"));
+            assert_eq!(entry.unavailable_reason, Some("No install-time standing grant or one-shot WeCom send-by-nickname parent grant exists; run desk-agent setup"));
         }
         let Json(catalog) = capabilities(State(AppState { database: db, security_database: None })).await;
         let entry = catalog.capabilities.iter().find(|entry| entry.instruction_action == "send_message_by_nickname").unwrap();

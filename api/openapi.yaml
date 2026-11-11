@@ -54,6 +54,13 @@ paths:
       security: [{ localToken: [] }]
       description: >-
         Synchronous terminal execution only. The required string `protocol_version` must be `"2"`.
+        Preflighted tasks first enter the private SQLite FIFO instruction queue and the caller waits
+        for its own record (status enum pending, executing, succeeded, failed, cancelled, unknown).
+        When a consumed send_message_by_nickname head was enqueued at T, pending same-app exact-nickname
+        requests enqueued within [T, T + instruction_queue.merge_window_secs] are merged immediately into
+        one dispatch by concatenating their messages in enqueue order, using
+        instruction_queue.merged_interval_ms between messages; each caller receives its own projected
+        output with a `queue` object. A full queue returns 429 rate_limited before enqueue.
         Supply a required sole target `app` ID matching `^[a-z][a-z0-9_.-]{0,127}$`
         (1..128 ASCII characters) and either non-empty natural-language `messages` (each non-blank)
         or non-empty exact `instructions`. When instructions are present they are authoritative
@@ -70,21 +77,23 @@ paths:
         Perception(PerceptionInstruction) and Application(ApplicationInstruction). AtomicInstruction
         directly encapsulates process_launch, window_center, window_capture, ax_inspect, click_button, click_focus, keyboard_text_input and keyboard_key_input.
         PerceptionInstruction contains vision_detect and screenshot_coordinates_convert. Vision, OCR and screenshot-coordinate conversion are perception, not OS atoms; no executable OCR action is provided.
-        ApplicationInstruction contains only send_message_by_nickname; Message contains only Text.
+        ApplicationInstruction contains only send_message_by_nickname; Message contains Text, Image and File.
         Search/open/draft/send helpers are internal under narrow parent delegation, never standalone actions, grants or discovery entries. Unknown action names fail deserialization and CLI parsing.
         JSON uses a flat action/params object: no Atomic/Application/Platform/Perception or category wrappers
         are accepted. protocol_version is the required string "2". No arbitrary process commands, raw mouse/key event actions or additional task routes
         are exposed. Instruction grouping does not enable unavailable actions or other apps.
-        Each action has its own capability, scope, digest, preflight and single-use authorization contract.
+        Each action has its own capability, scope, digest, preflight and single-use authorization contract; the install-time standing grant
+        from `desk-agent setup` satisfies any of them for its exact scope without consumption.
         must be running; the sole Accessibility window or, when there are multiple, its main
         window is selected and must map uniquely to a visible Core Graphics window by PID and
         geometry. Ambiguity fails; no screen rectangle or occluding windows are captured.
         macOS Screen Recording and Accessibility permissions are required. An explicit local grant
         binds app `wecom`, capability and scope `desktop.window.capture`, route `macos_gui`,
         target `main_or_single_app_window`, effect `capture`, parameters `none:v1`. Prior
-        screen or window grants do not authorize this operation. An authorized request may invoke
-        the Screen Recording permission request when absent; the OS controls prompting and a
-        restart may be required. Capability discovery never requests permission.
+        screen or window grants do not authorize this operation. Screen Recording permission is
+        requested only by install-time `desk-agent setup`; dispatch only preflights and never
+        prompts. A standing grant recorded by `desk-agent setup` satisfies any grant
+        requirement for its exact app/capability/route/target/effect scope. Capability discovery never requests permission.
         The sensitive PNG path is in a private `0700` directory under `~/.desk-agent`;
         the unique file has mode `0600` and its contents are not logged.
         Exact instruction `vision_detect` takes `params.objects`, an ordered array
@@ -162,7 +171,7 @@ paths:
         `{"point":[100.0,200.0],"expected_role":"AXCell","expected_label":null}`.
         Grants not using the required activate-v3-sha256 prefix, including `activate-v2-sha256:` and `activate-sha256:`, are rejected.
         Semantic-label requests require explicit v3 authorization.
-        The grant is atomically consumed and audited after preflight, immediately before
+        An exact grant (not a standing grant) is atomically consumed and audited after preflight, immediately before
         dispatch; capture or coordinate-conversion grants cannot be reused.
         After dispatch the adapter requires a stable target application, window, element and
         geometry, plus either an actual AXFocused or AXSelected false-to-true transition on
@@ -220,7 +229,7 @@ paths:
         target main_or_single_app_window, effect replace_text, element-input-v1-sha256:<digest>.
         Digest covers compact UTF-8 serde_json struct ordered point then text, with f64 normalization,
         no action/params wrapper. Search grants cannot authorize this operation; explicit capability approval is required.
-        Authorize before preflight; failed preflight retains the grant. Recheck and atomically consume with intent audit.
+        Authorize before preflight; failed preflight retains the grant. Recheck and atomically consume an exact grant (a standing grant is not consumed) with intent audit.
         Preallocate keyboard pairs before effects, focus once through AX, confirm target focus and app focused element,
         revalidate target/focus/state before Command+A and every zero-modifier Unicode chunk of at most 20 UTF-16
         units preserving scalars. Require exact stable-target readback within 2 seconds. No mouse, Enter/Return,
@@ -245,18 +254,23 @@ paths:
         Sole exact WeCom-only `send_message_by_nickname` takes required nickname, messages and interval_ms;
         unknown fields are rejected through the same shared strict typed serde parser used by CLI
         `--instruction 'send_message_by_nickname={"nickname":"张三","messages":[{"type":"text","content":"你好"}],"interval_ms":1000}'`.
-        Public kernel::instruction::Message supports only strict type=text objects with required content;
+        Public kernel::instruction::Message supports strict type=text objects with content and type=image/file objects with path, filename and mime_type;
+        Image and file require an absolute path of at most 4096 UTF-8 bytes, exact filename and concrete lowercase mime_type without wildcards; image accepts PNG/JPEG only.
+        File MIME is declared metadata, not type proof. Sources must be nonempty regular files, not directories or symlinks. Runtime limits: 20 MiB/image, 100 MiB/file, 200 MiB total.
+        Clipboard may expose data to local applications; validate preview. Native media and real sends are unverified.
+        V1 grants cannot authorize; no automatic upgrade. Older servers may reject new variants.
+        Navigation screenshot counts exclude additional attachment observations; hot cache is not zero screenshots.
         outer TaskRequest.messages is Vec<String>, protocol is "2" and the API path is /api/v2.
         Nickname is 1..256 UTF-8 bytes, nonblank and control-free; ordered messages contain 1..100 entries,
         each text is 1..256 UTF-8 bytes, nonblank and control-free. Preserve all original text.
         interval_ms is 0..60000 and (messages.length-1)*interval_ms <=600000; wait only between completed sends.
         Dedicated explicit single-use parent capability/scope wecom.message.send_by_nickname binds app wecom,
-        route macos_gui, target exact_nickname_conversation, effect send_text_messages and fixed parameters
-        instruction:send_message_by_nickname:v1, independent of all call parameters.
-        Content-bound send-by-nickname-v1-sha256:<digest> values cannot authorize execution; reject them as grants without conversion or automatic regrant.
+        route macos_gui, target exact_nickname_conversation, effect send_messages and fixed parameters
+        instruction:send_message_by_nickname:v2, independent of all call parameters.
+        Content-bound send-by-nickname-v2-sha256:<digest> values cannot authorize execution; reject them as grants without conversion or automatic regrant.
         The digest is only the immutable request audit/delegation/revocation identity: lowercase SHA-256 over compact
         UTF-8 serde struct fields strictly nickname,messages,interval_ms in that order, without action/params wrapper.
-        Atomically check and consume parent grant with durable intent before any launch within its validity period.
+        Atomically check and consume parent grant with durable intent before any launch within its validity period; an install-time standing grant passes the same atomic check without consumption.
         Before each child recheck the exact immutable current-request digest/lease and app/route/action restrictions,
         without per-child approval, ambient or minted broad child grants; do not change the request within the task.
         Always invoke process_launch then window_center and real measurement capture before reading
@@ -414,7 +428,7 @@ paths:
                   app: wecom
                   instructions: [{ action: keyboard_key_input, params: { key: "return", modifiers: [] } }]
               sendMessageByNickname:
-                summary: Ordered text workflow with dedicated single-use parent confirmation, fresh contact capture and bounded intervals
+                summary: Ordered message workflow with dedicated single-use or install-time standing parent authorization, fresh contact capture and bounded intervals
                 value:
                   protocol_version: "2"
                   app: wecom
@@ -441,7 +455,11 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
-        '429': { $ref: '#/components/responses/Error' }
+        '429':
+          description: rate_limited — the SQLite instruction queue reached instruction_queue.max_pending; the request was not enqueued. Not authorization to retry a dispatched effect.
+          content:
+            application/json:
+              schema: { $ref: './schemas/error.json' }
         '503': { $ref: '#/components/responses/Error' }
         '500': { $ref: '#/components/responses/Error' }
         default: { $ref: '#/components/responses/Error' }

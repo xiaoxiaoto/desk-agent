@@ -1,4 +1,4 @@
-//! Bounded delegation for the single approved nickname transaction.
+//! Bounded delegation for an approved nickname transaction (single-use or install-time standing parent grant).
 use super::{InvokeError, ROUTE};
 use crate::applications::wecom::{
     self, AppWindowCapture,
@@ -11,13 +11,16 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use std::sync::{Arc, LazyLock, Mutex};
 
+#[path = "media.rs"]
+mod media;
+
 const SCOPE: (&str, &str, &str) = (
     "wecom.message.send_by_nickname",
     "exact_nickname_conversation",
-    "send_text_messages",
+    "send_messages",
 );
-const PREFIX: &str = "send-by-nickname-v1-sha256:";
-const AUTHORIZATION: &str = "instruction:send_message_by_nickname:v1";
+const PREFIX: &str = "send-by-nickname-v2-sha256:";
+const AUTHORIZATION: &str = "instruction:send_message_by_nickname:v2";
 const NAV_QUERY: &str = "窗口最左侧竖栏中，消息气泡图标旁写“消息”的导航按钮";
 const SEARCH_QUERY: &str = "消息页左上方、放大镜图标旁的搜索输入框";
 const COMPOSER_QUERY: &str = "聊天窗口最下方的白色空白区域";
@@ -51,21 +54,19 @@ pub fn send_message_by_nickname_parameters(
 }
 
 pub async fn send_message_by_nickname_any_grant(db: &SqlitePool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM local_capability_grants WHERE app='wecom' AND capability=? AND route=? AND target=? AND effect=? AND parameters=?)")
+    sqlx::query_scalar::<_, i64>(super::grants::EXACT_OR_STANDING)
         .bind(SCOPE.0).bind(ROUTE).bind(SCOPE.1).bind(SCOPE.2).bind(AUTHORIZATION)
         .fetch_one(db).await.map(|v| v == 1)
 }
 
-/// Consume an instruction-level grant; audit the exact request separately.
+/// Check an instruction-level grant (exact grant consumed, install-time standing grant kept); audit the exact request separately.
 async fn authorize_parent(db: &SqlitePool, request: &str, request_digest: &str) -> Result<bool, sqlx::Error> {
     let mut tx = db.begin().await?;
     let insert = "INSERT INTO capability_audit (request_id, app, capability, route, target, effect, parameters, decision) VALUES (?, 'wecom', ?, ?, ?, ?, ?, ?)";
     sqlx::query(insert)
         .bind(request).bind(SCOPE.0).bind(ROUTE).bind(SCOPE.1).bind(SCOPE.2)
         .bind(request_digest).bind("authorization_check").execute(&mut *tx).await?;
-    let granted = sqlx::query("DELETE FROM local_capability_grants WHERE app='wecom' AND capability=? AND route=? AND target=? AND effect=? AND parameters=?")
-        .bind(SCOPE.0).bind(ROUTE).bind(SCOPE.1).bind(SCOPE.2).bind(AUTHORIZATION)
-        .execute(&mut *tx).await?.rows_affected() == 1;
+    let granted = super::grants::consume(&mut tx, SCOPE.0, ROUTE, SCOPE.1, SCOPE.2, AUTHORIZATION).await?;
     sqlx::query(insert)
         .bind(request).bind(SCOPE.0).bind(ROUTE).bind(SCOPE.1).bind(SCOPE.2)
         .bind(request_digest).bind(if granted { "dispatch_authorized" } else { "denied" })
@@ -83,7 +84,7 @@ async fn parent_audit(
     super::audit_text_input(db, request, parameters, decision, SCOPE).await
 }
 
-/// Revokes the in-flight bounded delegation; a consumed grant is never restored.
+/// Revokes the in-flight bounded delegation; a consumed grant is never restored and standing grants are untouched.
 pub async fn revoke_send_message_by_nickname(
     db: &SqlitePool,
     request: &str,
@@ -250,6 +251,7 @@ trait Backend: Send + 'static {
         command: Command,
         nickname: &str,
         messages: &[Message],
+        attachments: &media::PreparedMessages,
         interval: u64,
     ) -> anyhow::Result<Reply>;
 }
@@ -258,6 +260,7 @@ struct NativeBackend<L, C> {
     launch: Option<L>,
     center: Option<C>,
     contact_capture: Option<native::ContactCapture>,
+    attachment_sessions: Vec<Option<native::AttachmentSession>>,
 }
 impl<L, C> Backend for NativeBackend<L, C>
 where
@@ -269,6 +272,7 @@ where
         command: Command,
         nickname: &str,
         messages: &[Message],
+        attachments: &media::PreparedMessages,
         _interval: u64,
     ) -> anyhow::Result<Reply> {
         match command {
@@ -345,16 +349,35 @@ where
                 native::open_contact(binding, point, nickname)?;
             }
             Command::Draft(point, index) => {
-                let Message::Text { content } = &messages[index];
-                native::write_draft(point, nickname, content)?;
+                match &messages[index] {
+                    Message::Text { content } => native::write_draft(point, nickname, content)?,
+                    Message::Image { .. } | Message::File { .. } => {
+                        let attachment = attachments.get(index).ok_or_else(|| anyhow::anyhow!("Attachment unavailable"))?;
+                        let session = native::write_attachment(point, nickname, attachment)?;
+                        self.attachment_sessions[index] = Some(session);
+                    }
+                }
             }
             Command::SendGuard(_, index) => {
-                let Message::Text { content } = &messages[index];
-                native::validate_submission(nickname, content)?;
+                match &messages[index] {
+                    Message::Text { content } => native::validate_submission(nickname, content)?,
+                    Message::Image { .. } | Message::File { .. } => {
+                        let attachment = attachments.get(index).ok_or_else(|| anyhow::anyhow!("Attachment unavailable"))?;
+                        let session = self.attachment_sessions[index].as_ref().ok_or_else(|| anyhow::anyhow!("Attachment preview unavailable"))?;
+                        native::validate_attachment_submission(nickname, attachment, session)?;
+                    }
+                }
             }
             Command::Send(index) => {
-                let Message::Text { content } = &messages[index];
-                native::send_draft(nickname, content)?;
+                match &messages[index] {
+                    Message::Text { content } => native::send_draft(nickname, content)?,
+                    Message::Image { .. } | Message::File { .. } => {
+                        let attachment = attachments.get(index).ok_or_else(|| anyhow::anyhow!("Attachment unavailable"))?;
+                        let session = self.attachment_sessions[index].as_ref().ok_or_else(|| anyhow::anyhow!("Attachment preview unavailable"))?;
+                        native::send_attachment(nickname, attachment, session)?;
+                        self.attachment_sessions[index] = None;
+                    }
+                }
             }
             Command::Delay => anyhow::bail!("delay must run asynchronously"),
         }
@@ -509,6 +532,7 @@ struct Delegation<B> {
     active: String,
     nickname: Arc<str>,
     messages: Arc<Vec<Message>>,
+    attachments: Arc<media::PreparedMessages>,
     interval: u64,
     next: u64,
     stopped: bool,
@@ -543,7 +567,7 @@ impl<B: Backend> Delegation<B> {
             Command::Launch => (
                 "wecom.client.launch",
                 ROUTE,
-                json!({"step":"process_launch"}),
+                json!({"step":"process_launch","resources": (0..self.messages.len()).map(|i| self.attachments.binding(i)).collect::<Vec<_>>()}),
             ),
             Command::Center => (super::CENTER.0, ROUTE, json!({"step":"window_center"})),
             Command::Capture => (
@@ -648,13 +672,13 @@ impl<B: Backend> Delegation<B> {
                         super::ELEMENT_DIAGNOSE.0
                     },
                     ROUTE,
-                    json!({"step":if matches!(command,Command::Draft(..)) {"empty_draft_write"} else {"exact_draft_guard"},"point":p,"index":i,"message":message}),
+                    json!({"step":if matches!(command,Command::Draft(..)) {"empty_draft_write"} else {"exact_draft_guard"},"point":p,"index":i,"message":message,"resource":self.attachments.binding(*i)}),
                 )
             }
             Command::Send(i) => (
                 super::CHAT_DRAFT_SEND.0,
                 ROUTE,
-                json!({"step":"return_and_observe","index":i,"message":self.messages.get(*i).ok_or(InvokeError::Forbidden)?}),
+                json!({"step":"return_and_observe","index":i,"message":self.messages.get(*i).ok_or(InvokeError::Forbidden)?,"resource":self.attachments.binding(*i)}),
             ),
             Command::Delay => (
                 SCOPE.0,
@@ -763,13 +787,22 @@ impl<B: Backend> Delegation<B> {
             let nickname = self.nickname.clone();
             let messages = self.messages.clone();
             let interval = self.interval;
+            let attachments = Arc::clone(&self.attachments);
             tokio::task::spawn_blocking(move || {
                 // The native worker keeps the gate even if its waiter disconnects.
                 let _dispatch = dispatch;
+                match &command {
+                    Command::Launch => attachments.validate_all()?,
+                    Command::Draft(_, index) | Command::SendGuard(_, index) | Command::Send(index) => attachments.validate(*index)?,
+                    _ => {}
+                }
+                if let Command::Draft(_, index) = &command {
+                    attachments.mark_paste_started(*index);
+                }
                 backend
                     .lock()
                     .map_err(|_| anyhow::anyhow!("backend poisoned"))?
-                    .execute(command, &nickname, &messages, interval)
+                    .execute(command, &nickname, &messages, &attachments, interval)
             })
             .await
             .map_err(|_| anyhow::anyhow!("backend worker failed"))
@@ -1046,6 +1079,17 @@ async fn invoke_backend<B: Backend>(
     {
         return Err(InvokeError::Forbidden);
     }
+    let messages = Arc::new(messages.to_vec());
+    let original_messages = Arc::clone(&messages);
+    let attachments = match tokio::task::spawn_blocking(move || media::PreparedMessages::prepare(&original_messages)).await {
+        Ok(Ok(attachments)) => attachments,
+        _ => {
+            parent_audit(db, request, &parameters, "attachment_preflight_rejected")
+                .await.map_err(|_| InvokeError::AuditUnavailable)?;
+            return Err(InvokeError::InvalidInput);
+        }
+    };
+    let attachments = Arc::new(attachments);
     let active = format!("delegation_active:{}", uuid::Uuid::new_v4());
     parent_audit(db, request, &parameters, &active)
         .await
@@ -1056,7 +1100,8 @@ async fn invoke_backend<B: Backend>(
         parameters,
         active,
         nickname: Arc::from(nickname),
-        messages: Arc::new(messages.to_vec()),
+        messages: Arc::clone(&messages),
+        attachments,
         interval,
         next: 0,
         stopped: false,
@@ -1072,6 +1117,9 @@ async fn invoke_backend<B: Backend>(
     let result = delegation
         .workflow(&mut hits, &mut outcomes, &mut unknown)
         .await;
+    if result.is_ok() {
+        delegation.attachments.release_completed();
+    }
     delegation.stopped = true;
     let completed = outcomes
         .iter()
@@ -1123,6 +1171,7 @@ pub(super) async fn invoke(
             launch: Some(launch),
             center: Some(center),
             contact_capture: None,
+            attachment_sessions: (0..messages.len()).map(|_| None).collect(),
         },
     )
     .await

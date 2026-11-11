@@ -78,6 +78,8 @@ struct State {
     live_geometry: Option<Geometry>,
     contact_image_bounds: Option<[f64; 4]>,
     change_window_during_localization: bool,
+    tamper_attachment_after_paste: bool,
+    attachment_paths: Vec<std::path::PathBuf>,
 }
 impl State {
     fn geometry(&self) -> Geometry {
@@ -116,6 +118,7 @@ impl Backend for Model {
         command: Command,
         nickname: &str,
         messages: &[Message],
+        attachments: &media::PreparedMessages,
         _interval: u64,
     ) -> anyhow::Result<Reply> {
         // The model refuses every operation lacking a durable, currently pending child intent.
@@ -286,12 +289,28 @@ impl Backend for Model {
                         && p == state.point(Slot::Composer),
                     "nonempty draft or wrong header"
                 );
-                let Message::Text { content } = &messages[index];
-                state.draft = content.clone();
+                state.draft = match &messages[index] {
+                    Message::Text { content } => content.clone(),
+                    Message::Image { filename, .. } | Message::File { filename, .. } => {
+                        let attachment = attachments.get(index).ok_or_else(|| anyhow::anyhow!("missing snapshot"))?;
+                        state.attachment_paths.push(attachment.path.clone());
+                        if state.tamper_attachment_after_paste {
+                            #[cfg(unix)] {
+                                use std::os::unix::fs::PermissionsExt;
+                                std::fs::set_permissions(&attachment.path, std::fs::Permissions::from_mode(0o600))?;
+                            }
+                            std::fs::write(&attachment.path, b"changed payload")?;
+                        }
+                        filename.clone()
+                    }
+                };
                 state.events.push(format!("draft:{index}"));
             }
             Command::SendGuard(_, index) => {
-                let Message::Text { content } = &messages[index];
+                let content = match &messages[index] {
+                    Message::Text { content } => content,
+                    Message::Image { filename, .. } | Message::File { filename, .. } => filename,
+                };
                 anyhow::ensure!(state.contact && &state.draft == content, "draft changed");
                 state.events.push(format!("send_guard:{index}"));
                 if state.fail_send_intent {
@@ -299,7 +318,10 @@ impl Backend for Model {
                 }
             }
             Command::Send(index) => {
-                let Message::Text { content } = &messages[index];
+                let content = match &messages[index] {
+                    Message::Text { content } => content,
+                    Message::Image { filename, .. } | Message::File { filename, .. } => filename,
+                };
                 anyhow::ensure!(
                     state.contact && &state.draft == content,
                     "send no longer exact"
@@ -329,7 +351,7 @@ async fn database() -> SqlitePool {
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    sqlx::query("CREATE TABLE local_capability_grants(app TEXT,capability TEXT,route TEXT,target TEXT,effect TEXT,parameters TEXT,PRIMARY KEY(app,capability,route,target,effect,parameters))").execute(&db).await.unwrap();
+    sqlx::query("CREATE TABLE local_capability_grants(app TEXT,capability TEXT,route TEXT,target TEXT,effect TEXT,parameters TEXT,PRIMARY KEY(app,capability,route,target,effect,parameters))").execute(&db).await.unwrap(); sqlx::query(crate::runtime::grants::CREATE_TABLE).execute(&db).await.unwrap();
     sqlx::query("CREATE TABLE capability_audit(request_id TEXT,app TEXT,capability TEXT,route TEXT,target TEXT,effect TEXT,parameters TEXT,decision TEXT)").execute(&db).await.unwrap();
     coordinate_cache::initialize(&db).await.unwrap();
     db
@@ -939,10 +961,11 @@ async fn revocation_ack_waits_for_pending_native_dispatch_and_blocks_next_step()
             command: Command,
             nickname: &str,
             messages: &[Message],
+            attachments: &media::PreparedMessages,
             interval: u64,
         ) -> anyhow::Result<Reply> {
             if self.pause_on_send && matches!(command, Command::Send(0)) {
-                let result = self.model.execute(command, nickname, messages, interval);
+                let result = self.model.execute(command, nickname, messages, attachments, interval);
                 self.entered.notify_one();
                 self.resume.recv()?;
                 return result;
@@ -951,7 +974,7 @@ async fn revocation_ack_waits_for_pending_native_dispatch_and_blocks_next_step()
                 self.entered.notify_one();
                 self.resume.recv()?;
             }
-            self.model.execute(command, nickname, messages, interval)
+            self.model.execute(command, nickname, messages, attachments, interval)
         }
     }
     for pause_on_send in [false, true] {
@@ -1106,3 +1129,98 @@ async fn popup_preflight_and_binding_failures_stop_before_contact_or_draft() {
 }
 
 
+
+#[tokio::test]
+async fn mixed_messages_use_pinned_bytes_and_stop_after_unknown_attachment() {
+    let root = std::env::temp_dir().join(format!("desk-agent-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("report.pdf");
+    std::fs::write(&path, b"%PDF-1.7\nisolated attachment fixture").unwrap();
+    let mut list = messages()[..1].to_vec();
+    list.push(Message::File {
+        path: path.to_str().unwrap().into(),
+        filename: "report.pdf".into(),
+        mime_type: "application/pdf".into(),
+    });
+    list.push(messages()[1].clone());
+    let db = database().await;
+    let state = Arc::new(Mutex::new(State { fail_send: Some(1), ..State::default() }));
+    let output = run(&db, "mixed-unknown", Arc::clone(&state), &list, 0).await;
+    assert_eq!(output["completed_count"], 1);
+    assert_eq!(output["unknown_index"], 1);
+    assert_eq!(output["outcomes"][1]["submitted"], Value::Null);
+    let s = state.lock().unwrap();
+    assert_eq!(s.history, ["first exact text"]);
+    assert!(!s.events.iter().any(|event| event == "draft:2" || event == "send:2"));
+    let staged = s.attachment_paths[0].clone();
+    assert_ne!(staged, path);
+    assert_eq!(std::fs::read(&staged).unwrap(), std::fs::read(&path).unwrap());
+    drop(s);
+    let audits: Vec<String> = sqlx::query_scalar("SELECT parameters FROM capability_audit").fetch_all(&db).await.unwrap();
+    assert!(audits.iter().all(|row| !row.contains("report.pdf") && !row.contains("application/pdf") && !row.contains("%PDF")));
+    std::fs::remove_dir_all(staged.parent().unwrap().parent().unwrap()).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn changed_snapshot_cannot_reach_attachment_return_or_next_message() {
+    let root = std::env::temp_dir().join(format!("desk-agent-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("original.bin");
+    std::fs::write(&path, b"original payload").unwrap();
+    let list = vec![
+        Message::File { path: path.to_str().unwrap().into(), filename: "original.bin".into(), mime_type: "application/octet-stream".into() },
+        messages()[0].clone(),
+    ];
+    let db = database().await;
+    let state = Arc::new(Mutex::new(State { tamper_attachment_after_paste: true, ..State::default() }));
+    let output = run(&db, "changed-media", Arc::clone(&state), &list, 0).await;
+    assert_eq!(output["outcome"], "unknown");
+    assert_eq!(output["completed_count"], 0);
+    assert_eq!(output["outcomes"][0]["submitted"], false);
+    let s = state.lock().unwrap();
+    assert!(s.events.iter().any(|event| event == "draft:0"));
+    assert!(!s.events.iter().any(|event| event.starts_with("send:") || event == "draft:1"));
+    let staged = s.attachment_paths[0].clone();
+    drop(s);
+    std::fs::remove_dir_all(staged.parent().unwrap().parent().unwrap()).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn old_text_grant_cannot_authorize_attachment_or_read_its_source() {
+    let db = database().await;
+    sqlx::query("INSERT INTO local_capability_grants VALUES('wecom',?,'macos_gui',?,'send_text_messages','instruction:send_message_by_nickname:v1')")
+        .bind(SCOPE.0).bind(SCOPE.1).execute(&db).await.unwrap();
+    let messages = vec![Message::File {
+        path: "/nonexistent/desk-agent-private.pdf".into(),
+        filename: "desk-agent-private.pdf".into(),
+        mime_type: "application/pdf".into(),
+    }];
+    let state = Arc::new(Mutex::new(State::default()));
+    let result = invoke_backend(&db, "old-media-grant", NAME, &messages, 0, Model {
+        state: Arc::clone(&state), db: db.clone(), request: "old-media-grant".into(),
+    }).await;
+    assert_eq!(result, Err(InvokeError::Forbidden));
+    assert!(state.lock().unwrap().events.is_empty());
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM local_capability_grants").fetch_one(&db).await.unwrap();
+    assert_eq!(remaining, 1);
+}
+
+#[tokio::test]
+async fn invalid_attachment_consumes_authorization_but_never_launches() {
+    let db = database().await;
+    let messages = vec![Message::File {
+        path: "/nonexistent/desk-agent-private.pdf".into(),
+        filename: "desk-agent-private.pdf".into(),
+        mime_type: "application/pdf".into(),
+    }];
+    grant(&db, NAME, &messages, 0).await;
+    let state = Arc::new(Mutex::new(State::default()));
+    let result = invoke_backend(&db, "missing-media", NAME, &messages, 0, Model {
+        state: Arc::clone(&state), db: db.clone(), request: "missing-media".into(),
+    }).await;
+    assert_eq!(result, Err(InvokeError::InvalidInput));
+    assert!(state.lock().unwrap().events.is_empty());
+    assert!(!send_message_by_nickname_any_grant(&db).await.unwrap());
+}

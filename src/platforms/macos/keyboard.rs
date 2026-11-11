@@ -10,6 +10,9 @@ use super::permissions::{input_monitoring_available, trusted};
 
 /// The only key exposed by the current atomic instruction.
 pub(crate) const RETURN_KEY: u16 = 36;
+/// Virtual key `V`; only used as the Command-V paste chord for a staged attachment.
+pub(crate) const PASTE_KEY: u16 = 9;
+pub(crate) const COMMAND_FLAG: u64 = 0x0010_0000;
 const ROUTING_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn select(application: DesktopApplication) -> Result<desktop::CaptureTarget> {
@@ -43,12 +46,26 @@ pub(crate) fn press_return(application: DesktopApplication) -> Result<()> {
 pub(crate) fn press_return_guarded(
     application: DesktopApplication, validate: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
+    press_guarded(application, RETURN_KEY, 0, validate)
+}
+
+/// One Command-V chord with the same allocation, final-check and routing rules.
+/// The caller owns pasteboard preparation and post-paste observation.
+pub(crate) fn press_paste_guarded(
+    application: DesktopApplication, validate: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    press_guarded(application, PASTE_KEY, COMMAND_FLAG, validate)
+}
+
+fn press_guarded(
+    application: DesktopApplication, key: u16, flags: u64, validate: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let initial = select(application)?;
     let token = i64::from_ne_bytes(uuid::Uuid::new_v4().as_bytes()[..8].try_into().unwrap());
-    let tap = KeyboardMonitor::new(initial.pid, token).context("Input monitoring unavailable")?;
+    let tap = KeyboardMonitor::for_chord(initial.pid, token, key, flags).context("Input monitoring unavailable")?;
     ensure!(tap.enabled(), "Input monitoring unavailable");
     // Allocate the single pair before any effect; a failure here has no side effect.
-    let press = PreparedInputPair::keyboard(RETURN_KEY, 0, None, Some(token))?;
+    let press = PreparedInputPair::keyboard(key, flags, None, Some(token))?;
     validate()?;
     let current = select(application)?;
     ensure!(same_target(&initial, &current) && tap.enabled(), "Key press target changed before dispatch");

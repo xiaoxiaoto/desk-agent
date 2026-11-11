@@ -5,6 +5,7 @@ pub(crate) mod input;
 pub(crate) mod field;
 pub(crate) mod keyboard;
 pub(crate) mod screenshot;
+pub(crate) mod clipboard;
 
 use crate::kernel::platform::LaunchTarget;
 

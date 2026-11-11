@@ -1,0 +1,8 @@
+{
+  "instruction_queue": {
+    "merge_window_secs": 300,
+    "merged_interval_ms": 1000,
+    "max_pending": 1000,
+    "retention_secs": 604800
+  }
+}

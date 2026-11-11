@@ -5,7 +5,7 @@
 
 > 本文描述目标架构；[RPA 协议草案（中文）](docs/RPA_PROTOCOL.zh-CN.md) / [英文](docs/RPA_PROTOCOL.md) 定义目标任务协议和标准本地实现要求，**不代表现有实现已符合**。当前实现范围见文末；草案中的目标要求不能作为现有接口、Schema 或行为的能力声明。
 
-项目名称为 **DeskAgent**，项目包和命令名称使用 `desk-agent`。配置环境变量使用 `DESK_AGENT_*`；默认数据库路径为 `desk-agent.sqlite3`，可通过 `DESK_AGENT_DB` 或 `DATABASE_URL` 显式指定。
+项目名称为 **DeskAgent**，项目包和命令名称使用 `desk-agent`。配置环境变量使用 `DESK_AGENT_*`；全项目只使用一个私有 SQLite 文件 `~/.desk-agent/desk_agent.sqlite3`（目录 `0700`、文件 `0600`），授权、审计、坐标缓存、指令队列与元数据分表存放；可通过 `DESK_AGENT_DB` 指定路径。`DATABASE_URL` 与 `DESK_AGENT_SECURITY_DB` 已移除；默认位置首次启动时若只存在旧 `~/.desk-agent/security.sqlite3`，会原样重命名为新文件以保留授权与审计。
 
 ---
 
@@ -209,13 +209,13 @@ flowchart TD
 |---|---|---|
 | `AtomicInstruction` | `process_launch`、`window_center`、`window_capture`、`ax_inspect`、`click_button`、`click_focus`、`keyboard_text_input`、`keyboard_key_input` | 系统域受控操作；保留各能力既有目标、参数、前置条件和授权约束，不因此宣称支持其他应用 |
 | `PerceptionInstruction` | `vision_detect`、`screenshot_coordinates_convert` | 独立感知操作；视觉/OCR/截图坐标转换不属于 OS 原子指令，当前不提供 OCR 动作 |
-| `ApplicationInstruction` | 仅 `send_message_by_nickname` | 唯一应用业务指令；`Message` 仅支持文本。搜索、打开、草稿写入及发送是父授权窄范围委托的内部助手，不是公开独立动作、授权或目录项。未公开的动作在 serde/CLI 边界拒绝，不作为不可用占位。 |
+| `ApplicationInstruction` | 仅 `send_message_by_nickname` | 唯一应用业务指令；`Message` 支持文本、图片及文件。搜索、打开、草稿写入及发送是父授权窄范围委托的内部助手，不是公开独立动作、授权或目录项。未公开的动作在 serde/CLI 边界拒绝，不作为不可用占位。 |
 
-JSON 请求与响应中的步骤使用扁平的 `{"action":"…","params":{…}}`，不接受类别包装字段；所有类别共用 `TaskRequest`、Runtime 和 `POST /api/v2/rpa`，请求必填 `protocol_version: "2"`。CLI 不拼装 OS 输入序列；`app`、原文、授权摘要、单次消费及结果未知处理保持各能力契约。类型归属不等于能力可用。
+JSON 请求与响应中的步骤使用扁平的 `{"action":"…","params":{…}}`，不接受类别包装字段；所有类别共用 `TaskRequest`、Runtime 和 `POST /api/v2/rpa`，请求必填 `protocol_version: "2"`。CLI 不拼装 OS 输入序列；`app`、原文、授权摘要、单次消费（或安装时常驻授权，不消费）及结果未知处理保持各能力契约。类型归属不等于能力可用。
 
 当前 macOS 系统实现位于 `src/platforms/macos/{process,desktop,input,field,permissions}.rs`，进程身份、窗口/截图、AX 查询、输入事件及权限查询由平台层封装；企微元素选择器、联系人、草稿和发送规则位于 `src/applications/wecom/macos.rs`。其他操作系统尚无可执行支持；目标图中更细粒度的逐子操作授权与审计机制尚未完整实现。
 
-`keyboard_key_input` 不改变焦点；点击、焦点、文本输入与按键授权互相不能替代，已消费的单次授权不能重用。
+`keyboard_key_input` 不改变焦点；点击、焦点、文本输入与按键授权互相不能替代，已消费的单次授权不能重用；常驻授权按作用域长期有效直至 `setup --revoke`。
 
 ## 4. 二、插件扩展架构
 
@@ -394,22 +394,22 @@ feishu.document.create
 
 GUI 通道要求恰有一个运行中的企业微信实例；只有一个辅助功能窗口时选择该窗口，存在多个窗口时选择辅助功能主窗口，无法确定主窗口时返回错误。按窗口与活动显示器的最大重叠面积选屏；面积并列或没有重叠显示器时返回错误。设置位置后回读辅助功能位置和大小，只有与目标位置及原大小分别相差不超过 1 点才返回成功；回读失败或不符时返回错误，但窗口可能已经移动。该回读不是独立的截图验证。
 
-精确指令 `{"action":"window_capture"}` 或自然语言 `截取企业微信窗口` 通过 Runtime 的 `macos_gui` 通道调用能力及必需范围 `desktop.window.capture`，仅截取目标企业微信窗口及其自身子窗口。需要 macOS 屏幕录制和辅助功能权限、本地明确授权及恰好一个运行中的企业微信进程。只有一个辅助功能窗口时选该窗口，多个时选主窗口；须按 PID 和几何信息唯一匹配可见 Core Graphics 窗口，否则失败。不截取屏幕矩形或遮挡它的其他窗口，旧屏幕或窗口授权不能复用。返回值是 `~/.desk-agent` 下私有 `0700` 目录中唯一 `0600` PNG 文件的本地路径。截图属于敏感信息，不将截图内容写入日志；执行完成不代表已独立验证。
+精确指令 `{"action":"window_capture"}` 或自然语言 `截取企业微信窗口` 通过 Runtime 的 `macos_gui` 通道调用能力及必需范围 `desktop.window.capture`，仅截取目标企业微信窗口及其自身子窗口。需要 macOS 屏幕录制和辅助功能权限、本地明确授权及恰好一个运行中的企业微信进程。只有一个辅助功能窗口时选该窗口，多个时选主窗口；须按 PID 和几何信息唯一匹配可见 Core Graphics 窗口，否则失败。不截取屏幕矩形或遮挡它的其他窗口，旧屏幕或窗口授权不能复用。返回值是 `~/.desk-agent` 下私有 `0700` 目录中唯一 `0600` PNG 文件的本地路径。截图属于敏感信息，不将截图内容写入日志；执行完成不代表已独立验证。（安装时 `desk-agent setup` 写入的同作用域常驻授权亦满足，且不被消费。）
 
-精确指令 `{"action":"vision_detect","params":{"objects":["搜索按钮","会话列表"]}}` 接受 1–16 个有序非空白字符串，每项最多 256 个 UTF-8 字节；不支持自然语言规划。它先截取新的目标窗口图像，再按顺序逐项将敏感图像发送到固定本地端点 `http://127.0.0.1/v1/chat/completions`，模型 `wevisone-vl-4b`，`wevisone_task` 为 `referring`，不会静默向远程服务披露。除截图授权外，还需要分别明确授权能力及范围 `vision.window.locate`，通道 `local_vision`，目标 `main_or_single_app_window`，效果 `local_inference`，参数 `objects-sha256:<digest>`，应用仍为 `wecom`。摘要是完整有序对象数组经 `serde_json` 紧凑序列化所得 UTF-8 字节的 SHA-256 小写十六进制值；每次截图和披露前重新检查对应授权。
+精确指令 `{"action":"vision_detect","params":{"objects":["搜索按钮","会话列表"]}}` 接受 1–16 个有序非空白字符串，每项最多 256 个 UTF-8 字节；不支持自然语言规划。它先截取新的目标窗口图像，再按顺序逐项将敏感图像发送到固定本地端点 `http://127.0.0.1/v1/chat/completions`，模型 `wevisone-vl-4b`，`wevisone_task` 为 `referring`，不会静默向远程服务披露。除截图授权外，还需要分别明确授权能力及范围 `vision.window.locate`，通道 `local_vision`，目标 `main_or_single_app_window`，效果 `local_inference`，参数 `objects-sha256:<digest>`，应用仍为 `wecom`。摘要是完整有序对象数组经 `serde_json` 紧凑序列化所得 UTF-8 字节的 SHA-256 小写十六进制值；每次截图和披露前重新检查对应授权。（安装时 `desk-agent setup` 写入的同作用域常驻授权亦满足，且不被消费。）
 
 结果包含 `capture_id`、`image_size: [width,height]` 和按查询顺序排列的 `objects: [{query, predictions: [{label, coords: [x1,y1,x2,y2]}]}]`；`coords` 保持原始截图像素，不自动添加屏幕坐标。发送前图像会缩放并编码为 JPEG，模型坐标再换算回原图像像素；缩放可能影响小目标识别。结果同时包含 `capture_path`、`captured_at_unix_ms`、`target` 和 `coordinate_space`。
 
 截图操作也返回 `capture_id`。可独立提交精确指令 `{"action":"screenshot_coordinates_convert","params":{"capture_id":"123e4567-e89b-12d3-a456-426614174000","boxes":[[10.0,20.0,30.0,40.0]]}}`，或 CLI `--instruction 'screenshot_coordinates_convert={"capture_id":"123e4567-e89b-12d3-a456-426614174000","boxes":[[10.0,20.0,30.0,40.0]]}'`。ID 必须是规范小写 UUID；框为 1–100 个有限的原始图像像素 `[x1,y1,x2,y2]`，坐标在图片范围内且左上严格小于右下。只能使用 ID 对应的私有记录，不接受任意路径；记录 300 秒后过期，旧截图没有记录不能转换。目标窗口、显示器或几何发生变化时拒绝执行；操作不会截图、调用模型、请求屏幕权限或点击。
 
-转换需要单独明确授权：应用 `wecom`，能力及范围 `desktop.window.coordinates.convert`，通道 `macos_gui`，目标 `main_or_single_app_window`，效果 `read_geometry`，参数 `conversion-sha256:<digest>`。摘要为字段按 `capture_id`、`boxes` 顺序的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写十六进制值；数值采用 serde_json 的 f64 表示（如 `1.0`）。派发前重新检查授权。
+转换需要单独明确授权：应用 `wecom`，能力及范围 `desktop.window.coordinates.convert`，通道 `macos_gui`，目标 `main_or_single_app_window`，效果 `read_geometry`，参数 `conversion-sha256:<digest>`。摘要为字段按 `capture_id`、`boxes` 顺序的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写十六进制值；数值采用 serde_json 的 f64 表示（如 `1.0`）。派发前重新检查授权。（安装时 `desk-agent setup` 写入的同作用域常驻授权亦满足，且不被消费。）
 
 例如，将下面的 `capture_id` 和框替换成新截图返回的真实值；数字须按 `f64` 的 `serde_json` 格式书写：
 
 ```sh
 params='{"capture_id":"123e4567-e89b-12d3-a456-426614174000","boxes":[[10.0,20.0,30.0,40.0]]}'
 digest=$(printf '%s' "$params" | shasum -a 256 | cut -d ' ' -f 1)
-sqlite3 "$HOME/.desk-agent/security.sqlite3" "INSERT OR IGNORE INTO local_capability_grants VALUES ('wecom','desktop.window.coordinates.convert','macos_gui','main_or_single_app_window','read_geometry','conversion-sha256:$digest');"
+sqlite3 "$HOME/.desk-agent/desk_agent.sqlite3" "INSERT OR IGNORE INTO local_capability_grants VALUES ('wecom','desktop.window.coordinates.convert','macos_gui','main_or_single_app_window','read_geometry','conversion-sha256:$digest');"
 desk-agent-cli rpa --app wecom --instruction "screenshot_coordinates_convert=$params"
 ```
 
@@ -425,7 +425,7 @@ desk-agent-cli rpa --app wecom --instruction "screenshot_coordinates_convert=$pa
 
 需要本机 macOS 辅助功能权限。两种模式均要求坐标位于实时唯一选定、可见、不透明且处于前台的企业微信窗口内。`macos_gui` 使用系统全局 AX 命中测试精确确认目标 PID、窗口和角色；名称模式另核对可访问名称。在派发原生 CGEvent 鼠标按下/抬起之前，立即重复确认同一元素与未变化的窗口几何。不会仅因其他 Core Graphics 窗口的矩形覆盖该点就认定遮挡，也不会按进程名豁免；命中其他进程或窗口仍以 `point_obscured` 或 `target_element_mismatch` 拒绝。不提供辅助功能命中信息的覆盖层可能无法被此检查发现，因此这不是对所有可视遮挡的保证。无法完成所需检查时拒绝执行，不静默启动或激活应用、不点击目标应用外部、不发送文本，也不绕过派发前验证。
 前台应用身份通过 NSWorkspace 查询，并与该进程的 AXFocusedWindow 和所选窗口独立核对；任何查询失败仍停止。CGEvent 派发后最多只读观察 500 毫秒，检查焦点/选中状态变化或本次点击的被动进程级事件路由证据；不会再次点击、额外写入焦点或放宽窗口/弹出层检查。
-另需本地明确的一次性授权，绑定应用 `wecom`、能力及范围 `wecom.element.activate`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `activate_element`、精确坐标和预期角色及身份模式/名称的参数 `activate-v3-sha256:<digest>`。摘要为字段按 `point`、`expected_role`、`expected_label` 顺序的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写十六进制值；最后一个字段始终保留，省略或 `null` 标签均写为 `null`。例如坐标模式规范参数为 `{"point":[100.0,200.0],"expected_role":"AXCell","expected_label":null}`。坐标使用 serde_json f64 表示（如 `1.0`），参数不改写。`v3` 绑定明确身份模式策略；所有旧授权（包括 `activate-v2-sha256:` 和 `activate-sha256:`）均拒绝，语义名称请求也必须持有明确的 v3 授权。预检后、派发前立即原子消费授权并审计，截图或坐标转换授权不可复用。
+另需本地明确的一次性授权，绑定应用 `wecom`、能力及范围 `wecom.element.activate`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `activate_element`、精确坐标和预期角色及身份模式/名称的参数 `activate-v3-sha256:<digest>`。摘要为字段按 `point`、`expected_role`、`expected_label` 顺序的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写十六进制值；最后一个字段始终保留，省略或 `null` 标签均写为 `null`。例如坐标模式规范参数为 `{"point":[100.0,200.0],"expected_role":"AXCell","expected_label":null}`。坐标使用 serde_json f64 表示（如 `1.0`），参数不改写。`v3` 绑定明确身份模式策略；所有旧授权（包括 `activate-v2-sha256:` 和 `activate-sha256:`）均拒绝，语义名称请求也必须持有明确的 v3 授权。预检后、派发前立即原子消费授权并审计，截图或坐标转换授权不可复用。（安装时 `desk-agent setup` 写入的同作用域常驻授权亦满足，且不被消费。）
 
 授权后的激活预检失败可在 `capability_unavailable` 错误中给出可选固定 `diagnostic_code`，阶段为 `validation`，结果为 `not_dispatched`，`retryable` 为 false。代码不包含实际角色、标题、标签、坐标、截图或原始系统错误；不会推断遮挡，不适用于派发后的失败。完整代码及含义见 [RPA 协议](docs/RPA_PROTOCOL.zh-CN.md)。
 
@@ -437,7 +437,7 @@ desk-agent-cli rpa --app wecom --instruction "screenshot_coordinates_convert=$pa
 
 它只派发一对预先分配的鼠标左键按下/抬起事件，不重试、不派发第二次点击，也不为 `keyboard_text_input` 提供鼠标回退。成功须在 500 毫秒内满足：目标应用、窗口、元素及几何稳定；目标进程的被动 tap 按顺序观察到本次点击精确关联的鼠标按下与抬起事件对并路由至目标 PID；应用 `AXFocusedUIElement` 与点击元素完全一致且该元素 `AXFocused == true`。焦点只被观察，绝不通过 AX 写入；状态不变不足以证明成功。缺少证据、目标改变或派发后失败均为结果未知，绝不自动重试。
 
-该操作需要独立本地明确一次性授权：应用 `wecom`、能力及范围 `desktop.element.focus`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `focus_element`、参数 `focus-v1-sha256:<digest>`，摘要为字段按 `point`、`expected_role`、`expected_label` 顺序的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写值，始终包含 `expected_label`（省略或 `null` 均写为 `null`）。点击授权 `wecom.element.activate` 与输入授权 `desktop.element.input` 不能授权此操作，反之亦然；预检后、派发前原子消费并审计。成功仅返回 `{"focused":true}`；独立协议验证仍为 `not_performed`，不构成投递、回执或业务语义效果声明。
+该操作需要独立本地明确一次性授权：应用 `wecom`、能力及范围 `desktop.element.focus`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `focus_element`、参数 `focus-v1-sha256:<digest>`，摘要为字段按 `point`、`expected_role`、`expected_label` 顺序的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写值，始终包含 `expected_label`（省略或 `null` 均写为 `null`）。点击授权 `wecom.element.activate` 与输入授权 `desktop.element.input` 不能授权此操作，反之亦然；预检后、派发前原子消费并审计。成功仅返回 `{"focused":true}`；独立协议验证仍为 `not_performed`，不构成投递、回执或业务语义效果声明。（安装时 `desk-agent setup` 写入的同作用域常驻授权亦满足，且不被消费。）
 
 ### 授权输入框整值替换
 
@@ -445,7 +445,7 @@ desk-agent-cli rpa --app wecom --instruction "screenshot_coordinates_convert=$pa
 
 点位须重复命中当前唯一选定、前台、可见、不透明主窗口或唯一应用窗口内同一可写 `AXTextField` 或 `AXTextArea`。要求 `AXValue` 可读且可写、`AXFocused` 可写；明确禁用时拒绝，缺失 `AXEnabled` 时允许。须保持 PID、窗口、角色、几何及实时系统全局 AX 命中一致。原子操作不带页头、分割线、联系人或空草稿业务选择器。任何专门授权的编辑器（包括已有内容的聊天编辑器）均可能被整值替换；不继承内部草稿助手的业务保护或权限，也不发送。
 
-独立明确的单次授权绑定应用 `wecom`、能力及 scope `desktop.element.input`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `replace_text` 和 `element-input-v1-sha256:<digest>`。摘要为紧凑 UTF-8 `serde_json` 结构体按 **`point` 然后 `text`** 序列化的小写 SHA-256，遵循 f64 归一化并保留原文，不含 action/params 外壳。必须显式批准该能力，搜索、草稿、点击及截图授权均不可复用。先授权后只读预检，失败预检不消费授权；派发前复查授权并原子消费及提交意图审计。普通日志/审计只记摘要，不记录原文、旧值或回读。
+独立明确的单次授权绑定应用 `wecom`、能力及 scope `desktop.element.input`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `replace_text` 和 `element-input-v1-sha256:<digest>`。摘要为紧凑 UTF-8 `serde_json` 结构体按 **`point` 然后 `text`** 序列化的小写 SHA-256，遵循 f64 归一化并保留原文，不含 action/params 外壳。必须显式批准该能力，搜索、草稿、点击及截图授权均不可复用。先授权后只读预检，失败预检不消费授权；派发前复查授权并原子消费及提交意图审计。普通日志/审计只记摘要，不记录原文、旧值或回读。（安装时 `desk-agent setup` 写入的同作用域常驻授权亦满足，且不被消费。）
 
 副作用前预分配所有键盘按下/抬起事件对，仅请求一次 AX 焦点并确认目标 `AXFocused` 与应用 `AXFocusedUIElement`。全选前及每个 Unicode 分块前复查目标、焦点和状态。先以仅 Command 修饰的 Command+A 全选，再以零修饰 Unicode 分块输入，每块最多 20 UTF-16 单元且不拆分 Unicode 标量。最长 2 秒内在同一稳定目标精确回读。禁止鼠标、Enter/Return、剪贴板、AppleScript、AXValue 写入、重置焦点及重试输入。output 仅为 `{"text_input":true}`；响应步骤精确保留原始 point/text，完整响应属于敏感数据。独立验证为 `not_performed`，AX 回读不是独立验证；可能发生副作用或结果审计失败后的结果为 `unknown`，不得自动重试。不公开任意 OS 按键动作；仅独立的 `keyboard_key_input` 受限暴露零修饰 Return。
 
@@ -455,13 +455,13 @@ desk-agent-cli rpa --app wecom --instruction "screenshot_coordinates_convert=$pa
 
 独立精确指令 `{"action":"keyboard_key_input","params":{"key":"return","modifiers":[]}}` 是系统原子按键操作，必须是精确请求中的唯一指令，仅支持 `wecom`；CLI 使用 `--instruction 'keyboard_key_input={"key":"return","modifiers":[]}'`。两字段必填且拒绝未知字段：`key` 必须为 `return`，`modifiers` 必须为空数组。不接受其他按键、快捷键、字符、文本、指针事件或应用业务选择器。
 
-它需要独立的本地明确一次性授权：应用 `wecom`、能力及范围 `desktop.keyboard.key_input`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `key_input`、参数 `key-input-v1-sha256:<digest>`，摘要为字段按 `key`、`modifiers` 顺序的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写值，唯一合法参数的规范字节为 `{"key":"return","modifiers":[]}`。文本输入（`desktop.element.input`）、点击（`wecom.element.activate`）、焦点（`desktop.element.focus`）及草稿授权不能授权此操作，反之亦然；预检后、派发前原子消费并审计。
+它需要独立的本地明确一次性授权：应用 `wecom`、能力及范围 `desktop.keyboard.key_input`、通道 `macos_gui`、目标 `main_or_single_app_window`、效果 `key_input`、参数 `key-input-v1-sha256:<digest>`，摘要为字段按 `key`、`modifiers` 顺序的结构经 `serde_json` 紧凑 UTF-8 序列化后的 SHA-256 小写值，唯一合法参数的规范字节为 `{"key":"return","modifiers":[]}`。文本输入（`desktop.element.input`）、点击（`wecom.element.activate`）、焦点（`desktop.element.focus`）及草稿授权不能授权此操作，反之亦然；预检后、派发前原子消费并审计。（安装时 `desk-agent setup` 写入的同作用域常驻授权亦满足，且不被消费。）
 
 需要 macOS 辅助功能与输入监控权限、恰好一个运行中的企业微信进程，以及可见、不透明、前台的主窗口或唯一窗口。只读预检确认被动按键路由证据可用，不改变焦点、不派发输入。派发恰好一对预先分配的零修饰 Return 按下/抬起事件（键码 36），不改变焦点、不输入文本、不重试、不派发第二次按键。成功须在 500 毫秒内由目标进程的被动事件 tap 按顺序观察到本次精确关联的按下、抬起事件对已路由至企业微信进程；派发后任何失败（含路由证据缺失或不完整或审计失败）均为结果未知，绝不自动重试。成功仅返回 `{"pressed":true}`；独立协议验证仍为 `not_performed`，该本机路由证据不证明应用已处理、草稿已提交、消息已投递或任何业务语义效果。
 
 IPC 客户端对该精确视觉指令最多等待 1500 秒；等待超时或连接中断不代表服务端已停止，不能据此盲目重试。
 
-### 按精确昵称发送有序文本消息
+### 按精确昵称发送有序消息
 
 唯一精确指令 `ApplicationInstruction::SendMessageByNickname { nickname, messages, interval_ms }` 对应 `send_message_by_nickname`，仅支持 `wecom`，无自然语言规划，拒绝未知/缺失字段：
 
@@ -469,9 +469,11 @@ IPC 客户端对该精确视觉指令最多等待 1500 秒；等待超时或连�
 desk-agent-cli rpa --app wecom --instruction 'send_message_by_nickname={"nickname":"张三","messages":[{"type":"text","content":"你好"}],"interval_ms":1000}'
 ```
 
-共享 `kernel::instruction::Message` 只接受严格 `{"type":"text","content":"…"}`，与外层自然语言输入 `TaskRequest.messages: Vec<String>` 相互独立。昵称遵循 `valid_open_chat`（1..256 UTF-8 字节、非空白、无控制字符），消息为 1..100 条，每条内容遵循 `valid_app_input([0,0], content)`（1..256 UTF-8 字节、非空白、无控制字符）。不裁剪、归一化或改写原文。`interval_ms` 必填，范围 0..60000，且 `(消息数 - 1) * interval_ms <= 600000`，仅在上一条完成后到下一条发送前等待。
+共享 `kernel::instruction::Message` 接受严格文本 `{"type":"text","content":"…"}` 及图片/文件 `{"type":"image|file","path":"/绝对路径/文件名","filename":"文件名","mime_type":"类型/子类型"}`，与外层自然语言输入 `TaskRequest.messages: Vec<String>` 相互独立。昵称遵循 `valid_open_chat`（1..256 UTF-8 字节、非空白、无控制字符），消息为 1..100 条，每条文本内容遵循 `valid_app_input([0,0], content)`（1..256 UTF-8 字节、非空白、无控制字符）。不裁剪、归一化或改写原文。`interval_ms` 必填，范围 0..60000，且 `(消息数 - 1) * interval_ms <= 600000`，仅在上一条完成后到下一条发送前等待。
 
-独立明确单次父授权绑定应用 `wecom`、能力及范围 `wecom.message.send_by_nickname`、`macos_gui`、`exact_nickname_conversation`、`send_text_messages`，参数固定为 `instruction:send_message_by_nickname:v1`，与昵称、消息内容、顺序及间隔等全部调用参数无关。内容绑定的 `send-by-nickname-v1-sha256:<digest>` 授权被拒绝，不自动重新授权。不可变请求摘要按字段严格为 `nickname,messages,interval_ms` 顺序的紧凑 UTF-8 serde 结构体 JSON 计算小写 SHA-256，仅作为审计、任务内委托及撤销标识，不是授权参数。父授权与意图审计必须在任何启动前事务性消费；每个子操作前重新检查授权有效期及绑定当前不可变请求摘要和租约的精确委托范围，不能更改当前请求、复用其他动作授权或临时铸造宽泛授权，也不逐子步骤审批。
+独立明确单次父授权绑定应用 `wecom`、能力及范围 `wecom.message.send_by_nickname`、`macos_gui`、`exact_nickname_conversation`、`send_messages`，参数固定为 `instruction:send_message_by_nickname:v2`，与昵称、消息内容、顺序及间隔等全部调用参数无关。内容绑定的 `send-by-nickname-v2-sha256:<digest>` 授权被拒绝，不自动重新授权。不可变请求摘要按字段严格为 `nickname,messages,interval_ms` 顺序的紧凑 UTF-8 serde 结构体 JSON 计算小写 SHA-256，仅作为审计、任务内委托及撤销标识，不是授权参数。父授权与意图审计必须在任何启动前事务性消费；每个子操作前重新检查授权有效期及绑定当前不可变请求摘要和租约的精确委托范围，不能更改当前请求、复用其他动作授权或临时铸造宽泛授权，也不逐子步骤审批。（安装时 `desk-agent setup` 写入的同作用域常驻授权亦满足，且不被消费。）
+
+附件使用不超过 4096 UTF-8 字节的绝对本地路径和原始文件名（与路径 basename 完全一致、非空白、无控制字符或斜杠、最多 255 UTF-8 字节）；MIME 为无参数的小写 ASCII 类型/子类型，最多 127 字节。MIME 不接受通配符；运行时只接受非空普通文件，拒绝目录和符号链接。图片仅支持 image/png 和 image/jpeg；文件 MIME 是调用方声明的原始元数据，并非文件类型证明。运行时限制每张图片 20 MiB、每个文件 100 MiB、合计 200 MiB；授权后、启动前准备不可变快照，每个子操作前复核。剪贴板可能向其他本地应用暴露内容；提交前校验预览。元数据仅出现在授权指令/输出中，审计只保存摘要。原生媒体和真实发送尚未验证。图片必须实际解码为匹配声明的 PNG/JPEG，最大 8192×8192，解码器分配上限 256 MiB。粘贴或发送结果未知时保留私有快照供核对；全部发送确认后才清理。协议/API 2 为增量扩展，旧服务器可能拒绝新变体。导航截图次数只描述定位，附件可能需要更多观察，全热缓存也不意味着零截图。v1 授权被拒绝，不自动升级。
 
 #### SQLite 坐标缓存设计
 
@@ -486,8 +488,8 @@ desk-agent-cli rpa --app wecom --instruction 'send_message_by_nickname={"nicknam
 - 每次仍先启动→居中→截图测量，随后在导航、搜索、联系人、输入框阶段按需查询。重复昵称且布局兼容时，四类坐标都应查询缓存；消息正文及间隔变化不影响昵称定位键，不影响各自精确委托与授权检查。
 - 数据库查到记录不等于有效命中。联系人仍保留本次整窗截图及原始 `ContactCapture`，核对精确搜索词、唯一精确普通联系人、候选点 AX 命中和弹层归属，分发前再次核对原始绑定。候选失效重新视觉定位，歧义或证据变化停止。
 - 目标全热路径仍为两次整窗截图，但可跳过四次视觉／转换；全冷成功路径四次截图及四次视觉／转换。不免录屏权限，不承诺实测提速或送达。
-- 复用现有同用户私有安全数据库、唯一索引及 UPSERT；全局初始上限 192 条、内容初始上限 1,024 条，分别按最近成功验证淘汰，成功验证时间更新按 60 秒限频。不增加内存副本、不存昵称及消息明文；摘要不等于匿名化或授权。
-- 缓存表为 `coordinate_cache`，复用 `DESK_AGENT_SECURITY_DB` 指定的私有安全数据库，默认 `~/.desk-agent/security.sqlite3`，不是普通任务数据库。每条记录含应用／通道、作用域、指令／内容摘要、控件、布局版本、规范 JSON 几何键、相对坐标 `point_x`／`point_y`、创建及最近成功验证时间。精确昵称键为 `nickname-v1-sha256:<原始 UTF-8 昵称的 SHA-256 小写十六进制>`，不包含消息正文或间隔，也不是整条请求的委托摘要。
+- 复用唯一同用户私有项目数据库 `desk_agent.sqlite3`、唯一索引及 UPSERT；全局初始上限 192 条、内容初始上限 1,024 条，分别按最近成功验证淘汰，成功验证时间更新按 60 秒限频。不增加内存副本、不存昵称及消息明文；摘要不等于匿名化或授权。
+- 缓存表为 `coordinate_cache`，位于唯一私有项目数据库（`DESK_AGENT_DB`，默认 `~/.desk-agent/desk_agent.sqlite3`）。每条记录含应用／通道、作用域、指令／内容摘要、控件、布局版本、规范 JSON 几何键、相对坐标 `point_x`／`point_y`、创建及最近成功验证时间。精确昵称键为 `nickname-v1-sha256:<原始 UTF-8 昵称的 SHA-256 小写十六进制>`，不包含消息正文或间隔，也不是整条请求的委托摘要。
 - 缓存初始化（包括重启时缓存表不兼容）或读取失败，只在授权／审计／实时验证仍可用时退回真实定位；仅缓存故障不禁用授权／审计库，不自动删除或重建旧表。写失败不重复输入；授权／审计失败仍失败关闭。响应 `cache_hits` 保留 `message_navigation`、`search`、`composer` 并增加 `contact_result`，只有实时验证后的复用为 true，部分 `unknown` 输出也保留这些字段。
 
 #### 缓存与联系人执行边界
@@ -506,7 +508,7 @@ desk-agent-cli rpa --app wecom --instruction 'send_message_by_nickname={"nicknam
 
 消息按原顺序各发送一次，输出保留逐条 `submitted`/`message_observed`、完成数量、缓存命中与可选未知索引。中途任何失败/未知均停止，HTTP/IPC 返回保留部分输出的 `unknown` 共享任务响应；不可因超时、断连、审计失败重发。证据只表示本地 UI 提交/观察，不是送达或已读，独立验证仍为 `not_performed`。日志/审计仅保留摘要与脱敏状态，完整响应中的原始指令含敏感昵称和内容，不得普通记录。开发验证不得发送消息，除非用户明确授权。
 
-输出包含诊断字段 `progress`（成功示例 `{"phase":"completed","operation":"parent_audit","message_index":null,"status":"completed","failure":null,"contact_diagnostic":null}`）与覆盖全部请求消息的 `message_states`（如 `[{"index":0,"state":"observed"}]`）。`phase` 为 `launch|center|measurement|navigation|search|contact|composer|message_validation|draft|send_guard|send|interval|final_audit|completed`；`operation` 仅为固定脱敏命令标识，完整枚举见 [协议](docs/RPA_PROTOCOL.zh-CN.md#按企业微信精确昵称发送有序文本)。操作前记录进度，截图/视觉/坐标转换失败保留所属业务阶段；`message_index` 为零起始索引或 null，`status` 为 `completed|stopped`，`failure` 为 null 或 `authorization|audit|operation|postcondition`，不暴露原始错误。父审计失败明确停在 `final_audit`/`parent_audit`，错误回复/后置条件失败也保留诊断证据。每条 `state` 依据证据为 `not_started`（未准备）、`preparing`（已准备但无提交证据）、`submission_unknown`（可能提交但未观察完成）或 `observed`（仅本地观察），不声称送达；即使 `outcomes` 为空也覆盖全部消息。任何状态均不授权盲目重试。
+输出包含诊断字段 `progress`（成功示例 `{"phase":"completed","operation":"parent_audit","message_index":null,"status":"completed","failure":null,"contact_diagnostic":null}`）与覆盖全部请求消息的 `message_states`（如 `[{"index":0,"state":"observed"}]`）。`phase` 为 `launch|center|measurement|navigation|search|contact|composer|message_validation|draft|send_guard|send|interval|final_audit|completed`；`operation` 仅为固定脱敏命令标识，完整枚举见 [协议](docs/RPA_PROTOCOL.zh-CN.md#按企业微信精确昵称发送有序消息)。操作前记录进度，截图/视觉/坐标转换失败保留所属业务阶段；`message_index` 为零起始索引或 null，`status` 为 `completed|stopped`，`failure` 为 null 或 `authorization|audit|operation|postcondition`，不暴露原始错误。父审计失败明确停在 `final_audit`/`parent_audit`，错误回复/后置条件失败也保留诊断证据。每条 `state` 依据证据为 `not_started`（未准备）、`preparing`（已准备但无提交证据）、`submission_unknown`（可能提交但未观察完成）或 `observed`（仅本地观察），不声称送达；即使 `outcomes` 为空也覆盖全部消息。任何状态均不授权盲目重试。
 
 `progress.contact_diagnostic` 是必需的可空字段，覆盖联系人整窗截图/就绪、本地推理、转换预检查及 `exact_contact` 失败，其他失败为 null；诊断在后续父审计失败时仍保留。形如 `{"dispatch":"not_dispatched","code":"contact_target_unavailable"}`，`dispatch` 为 `not_dispatched|dispatched|unknown`，仅描述联系人点击，不代表父任务在此之前没有 GUI 副作用。已证明点击前失败（包括就绪超时）为 `not_dispatched`，父任务结果仍为 `unknown`，不表示可重试。固定代码完整枚举见 [执行 Schema](api/schemas/task-step-execution.json)，包含主窗口、搜索焦点/几何/锚点/原文、弹窗/树、联系人结果/单元格/窗口/几何/命中/点位及截图/绑定/私有记录等细粒度原因。非预期/无类型错误使用 `contact_operation_failed`，仅无法排除点击已分发时才标为 `unknown`，超时保留最近具体类型化原因。不含原始 OS/AX 错误、昵称、文本或坐标；本地证据不证明送达。
 
@@ -933,7 +935,7 @@ desk-agent/
 |---|---|---|
 | Read | 截图、读取联系人或消息（受数据权限约束） | 授权后允许，记录审计 |
 | Low Risk Write | 输入草稿、创建未提交内容 | 按策略允许或确认 |
-| High Risk Write | 发送消息、提交表单、创建外部事件 | 默认要求明确授权或用户确认 |
+| High Risk Write | 发送消息、提交表单、创建外部事件 | 默认要求明确授权或用户确认；本地实现由安装时常驻授权预先批准，可撤销 |
 | Destructive | 删除记录、批量操作、不可逆变更 | 强确认、范围预览、审计；必要时禁止自动执行 |
 
 风险等级不能只由模型输出决定，应由能力定义、参数、目标对象、用户策略和运行环境共同计算。
@@ -1047,49 +1049,73 @@ The repository is a single Cargo package with daemon, CLI, and desktop entry poi
 
 唤醒企业微信可通过共享任务请求发送精确指令 `{"protocol_version":"2","app":"wecom","instructions":[{"action":"process_launch"}]}`，或使用自然语言消息 `唤醒企业微信`。例如先启动 `desk-agent`，再运行 `desk-agent-cli rpa --app wecom --instruction process_launch`。macOS 上该能力使用 `open -a 企业微信`；命令成功只表示启动请求已提交，不代表窗口已独立验证或用户已登录。
 
-窗口居中指令为 `window_center`，自然语言为 `将企业微信窗口居中`。需要 macOS 辅助功能权限、可移动的企业微信主窗口或唯一窗口，以及本地明确授权。启动 Runtime 一次创建 `~/.desk-agent/security.sqlite3` 后，由当前用户授权：
+### 指令队列与同昵称合并
+
+通过预检的 HTTP/IPC 任务先进入唯一私有项目数据库 `desk_agent.sqlite3` 的 `instruction_queue` 表（SQLite FIFO），由单一 worker 经 Runtime 能力调用器顺序执行，调用方同步等待自身结果，协议形状不变。记录状态枚举：`pending` 待执行、`executing` 执行中、`succeeded` 执行成功、`failed` 执行失败、`cancelled` 取消执行、`unknown` 结果未知；终态即清除载荷，重启时遗留 `executing` 置为 `unknown` 不重发。
+
+消费到入队时间为 T 的 `send_message_by_nickname` 时立即发送，并把队列中入队时间在 `[T, T+窗口]` 内、同应用同精确昵称的待执行指令的 `messages` 按顺序拼接为一次发送（上限 100 条、间隔预算 600000ms），合并发送的消息间延时取配置值；发送后按各自消息区间把记录更新为相应状态。配置文件 `~/.desk-agent/config.json`（或 `DESK_AGENT_CONFIG`），示例见 `config/desk-agent.example.json`：
+
+```json
+{ "instruction_queue": { "merge_window_secs": 300, "merged_interval_ms": 1000, "max_pending": 1000, "retention_secs": 604800 } }
+```
+
+合并行为已通过注入执行器的自动测试和隔离存储下的 IPC 烟测（授权拒绝、未分发）验证；合并后的真实企微发送未实测。
+
+### 安装时授权
+
+安装时一次性完成全部授权，执行时不再弹窗：
 
 ```sh
-sqlite3 "$HOME/.desk-agent/security.sqlite3" "INSERT OR IGNORE INTO local_capability_grants VALUES ('wecom','wecom.window.center','macos_gui','main_or_single_wecom_window','move_without_resize','none:v1');"
+scripts/install.sh            # 构建、安装到 ~/.local/bin，并执行 desk-agent setup
+desk-agent setup              # 或单独执行：请求 macOS 权限并写入全部常驻授权
+desk-agent setup --revoke     # 撤销全部常驻授权（macOS 权限需在系统设置中移除）
+```
+
+`setup` 由 `desk-agent` 运行时可执行文件本身一次性请求辅助功能、屏幕录制和输入监控权限（macOS 不允许静默授予，需在系统设置中各确认一次，之后可能需重启 Runtime），并在 `~/.desk-agent/desk_agent.sqlite3` 的 `standing_capability_grants` 表中为全部 10 个公开能力（含 `wecom.message.send_by_nickname` 实发消息）写入常驻授权。常驻授权对该能力作用域的任意参数有效、不被消费，安装与撤销均有审计；下文手工写入 `local_capability_grants` 的精确单次授权仍然可用，并优先消费。
+
+窗口居中指令为 `window_center`，自然语言为 `将企业微信窗口居中`。需要 macOS 辅助功能权限、可移动的企业微信主窗口或唯一窗口，以及本地授权（安装时常驻授权已覆盖）。不使用常驻授权时，也可在启动 Runtime 一次创建 `~/.desk-agent/desk_agent.sqlite3` 后手工写入精确授权：
+
+```sh
+sqlite3 "$HOME/.desk-agent/desk_agent.sqlite3" "INSERT OR IGNORE INTO local_capability_grants VALUES ('wecom','wecom.window.center','macos_gui','main_or_single_wecom_window','move_without_resize','none:v1');"
 ```
 
 窗口截图需另行明确授权，范围为能力 `desktop.window.capture`、目标 `main_or_single_app_window`、效果 `capture`、参数 `none:v1`；不符合此范围的屏幕或窗口授权不能复用：
 
 ```sh
-sqlite3 "$HOME/.desk-agent/security.sqlite3" "INSERT OR IGNORE INTO local_capability_grants VALUES ('wecom','desktop.window.capture','macos_gui','main_or_single_app_window','capture','none:v1');"
+sqlite3 "$HOME/.desk-agent/desk_agent.sqlite3" "INSERT OR IGNORE INTO local_capability_grants VALUES ('wecom','desktop.window.capture','macos_gui','main_or_single_app_window','capture','none:v1');"
 ```
 
 可用 `desk-agent-cli rpa --app wecom --instruction window_capture` 或自然语言 `截取企业微信窗口` 截取目标窗口。成功时步骤的 `output.path` 指向 `~/.desk-agent/captures/` 中的私有 PNG；截图包含敏感内容，使用者负责保留和删除。运行进程需要 macOS「屏幕录制」和「辅助功能」权限及运行中的企业微信窗口。
 
-已获本地截图授权的请求在缺少屏幕录制权限时会调用 macOS 授权接口；是否显示弹窗由系统决定，用户仍须手动授权，可能需要在系统设置中授权并重启 Runtime。能力目录查询不会触发授权弹窗。
+屏幕录制权限只在安装时由 `desk-agent setup` 请求；执行截图时只预检，缺少权限即失败，不再弹窗。能力目录查询不会触发授权弹窗。
 
 对象定位除上述截图授权外还需按精确对象数组单独授权；数组顺序或内容变化即需新的摘要和授权。例如 ASCII 数组 `["search button","chat list"]` 的摘要可用以下命令计算，然后仅在同意将截图发送到指定本地视觉服务时授予：
 
 ```sh
 digest=$(printf '%s' '["search button","chat list"]' | shasum -a 256 | cut -d ' ' -f 1)
-sqlite3 "$HOME/.desk-agent/security.sqlite3" "INSERT OR IGNORE INTO local_capability_grants VALUES ('wecom','vision.window.locate','local_vision','main_or_single_app_window','local_inference','objects-sha256:$digest');"
+sqlite3 "$HOME/.desk-agent/desk_agent.sqlite3" "INSERT OR IGNORE INTO local_capability_grants VALUES ('wecom','vision.window.locate','local_vision','main_or_single_app_window','local_inference','objects-sha256:$digest');"
 desk-agent-cli rpa --app wecom --instruction 'vision_detect=["search button","chat list"]'
 ```
 
 该示例输入恰好是对应数组的 `serde_json` 紧凑 UTF-8 序列化；其他输入必须按同一规则序列化后计算摘要。撤销该对象数组的视觉授权：
 
 ```sh
-sqlite3 "$HOME/.desk-agent/security.sqlite3" "DELETE FROM local_capability_grants WHERE app='wecom' AND capability='vision.window.locate' AND route='local_vision' AND target='main_or_single_app_window' AND effect='local_inference' AND parameters='objects-sha256:$digest';"
+sqlite3 "$HOME/.desk-agent/desk_agent.sqlite3" "DELETE FROM local_capability_grants WHERE app='wecom' AND capability='vision.window.locate' AND route='local_vision' AND target='main_or_single_app_window' AND effect='local_inference' AND parameters='objects-sha256:$digest';"
 ```
 
 撤销截图授权：
 
 ```sh
-sqlite3 "$HOME/.desk-agent/security.sqlite3" "DELETE FROM local_capability_grants WHERE app='wecom' AND capability='desktop.window.capture' AND route='macos_gui' AND target='main_or_single_app_window' AND effect='capture' AND parameters='none:v1';"
+sqlite3 "$HOME/.desk-agent/desk_agent.sqlite3" "DELETE FROM local_capability_grants WHERE app='wecom' AND capability='desktop.window.capture' AND route='macos_gui' AND target='main_or_single_app_window' AND effect='capture' AND parameters='none:v1';"
 ```
 
 需要时撤销授权：
 
 ```sh
-sqlite3 "$HOME/.desk-agent/security.sqlite3" "DELETE FROM local_capability_grants WHERE app='wecom' AND capability='wecom.window.center' AND route='macos_gui' AND target='main_or_single_wecom_window' AND effect='move_without_resize' AND parameters='none:v1';"
+sqlite3 "$HOME/.desk-agent/desk_agent.sqlite3" "DELETE FROM local_capability_grants WHERE app='wecom' AND capability='wecom.window.center' AND route='macos_gui' AND target='main_or_single_wecom_window' AND effect='move_without_resize' AND parameters='none:v1';"
 ```
 
-`DESK_AGENT_SECURITY_DB` 可指定安全库；父目录须由当前用户拥有且权限为 `0700`，数据库文件须为 `0600`。授权与审计存储不可用时不会分发居中操作。
+`DESK_AGENT_DB` 可指定项目数据库；父目录须由当前用户拥有且权限为 `0700`，数据库文件须为 `0600`。授权与审计存储不可用时不会分发居中操作。
 
 This is not a Core or Durable conformance claim: general scope and confirmation policies, durable task recovery, event replay, independent verification and task observation are not implemented. The `recovery` request field is rejected; the draft requires a coordinated contract revision before recovery can be supported. The protocol's security and reliability requirements remain the target, not evidence of implemented behavior.
 

@@ -3,6 +3,7 @@ use desk_agent::{kernel::{instruction::{ApplicationInstruction, AtomicInstructio
 async fn runtime_database() -> sqlx::SqlitePool {
     let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     sqlx::query("CREATE TABLE local_capability_grants (app TEXT NOT NULL, capability TEXT NOT NULL, route TEXT NOT NULL, target TEXT NOT NULL, effect TEXT NOT NULL, parameters TEXT NOT NULL)").execute(&pool).await.unwrap();
+    sqlx::query(desk_agent::runtime::grants::CREATE_TABLE).execute(&pool).await.unwrap();
     sqlx::query("CREATE TABLE capability_audit (id INTEGER PRIMARY KEY, request_id TEXT NOT NULL, app TEXT NOT NULL, capability TEXT NOT NULL, route TEXT NOT NULL, target TEXT NOT NULL, effect TEXT NOT NULL, parameters TEXT NOT NULL, decision TEXT NOT NULL)").execute(&pool).await.unwrap();
     pool
 }
@@ -580,6 +581,37 @@ fn nickname_messages_preserve_exact_blocks_and_enforce_bounded_batch() {
     }
 }
 
+#[test]
+fn attachment_metadata_roundtrips_and_shared_validation_rejects_invalid_inputs() {
+    use serde_json::json;
+    use desk_agent::kernel::task::valid_send_message_by_nickname;
+    use desk_agent::kernel::instruction::Message;
+    let values = json!([
+        {"type":"text","content":" first "},
+        {"type":"image","path":"/tmp/原图.png","filename":"原图.png","mime_type":"image/png"},
+        {"type":"file","path":"/tmp/report.pdf","filename":"report.pdf","mime_type":"application/pdf"}
+    ]);
+    let messages: Vec<Message> = serde_json::from_value(values.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&messages).unwrap(), values);
+    assert!(valid_send_message_by_nickname("Alice", &messages, 0));
+    for value in [
+        json!({"type":"file","path":"relative","filename":"relative","mime_type":"application/pdf"}),
+        json!({"type":"file","path":"/tmp/a","filename":"b","mime_type":"application/pdf"}),
+        json!({"type":"file","path":"/tmp/a","filename":"a","mime_type":"Application/pdf"}),
+        json!({"type":"file","path":"/tmp/a","filename":"a","mime_type":"application/pdf; charset=utf-8"}),
+        json!({"type":"file","path":"/tmp/a","filename":"a","mime_type":"application/*"}),
+        json!({"type":"file","path":format!("/{}/a", "x".repeat(4096)),"filename":"a","mime_type":"application/pdf"}),
+        json!({"type":"image","path":"/tmp/a","filename":"a","mime_type":"image/gif"}),
+        json!({"type":"file","path":"/tmp/a","filename":"a","mime_type":"application/pdf","extra":true}),
+        json!({"type":"other","path":"/tmp/a","filename":"a","mime_type":"application/pdf"}),
+    ] {
+        match serde_json::from_value::<Message>(value) {
+            Ok(message) => assert!(!valid_send_message_by_nickname("Alice", &[message], 0)),
+            Err(_) => {}
+        }
+    }
+}
+
 #[tokio::test]
 async fn nickname_batch_rejects_ambient_grants_before_any_native_effect() {
     use desk_agent::kernel::instruction::Message;
@@ -600,7 +632,7 @@ async fn nickname_batch_rejects_ambient_grants_before_any_native_effect() {
     for (capability,target,effect) in [
         ("wecom.chat.draft.send","current_contact_exact_message_editor","send_chat_draft"),
         ("desktop.keyboard.key_input","main_or_single_app_window","key_input"),
-        ("wecom.message.send_by_nickname","wrong_target","send_text_messages"),
+        ("wecom.message.send_by_nickname","wrong_target","send_messages"),
         ("wecom.message.send_by_nickname","exact_nickname_conversation","wrong_effect"),
     ] {
         sqlx::query("INSERT INTO local_capability_grants VALUES ('wecom',?,'macos_gui',?,?,?)")

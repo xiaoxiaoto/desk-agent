@@ -247,7 +247,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("desk-agent-coordinate-cache-{}", uuid::Uuid::new_v4()));
         std::fs::DirBuilder::new().mode(0o700).create(&directory).unwrap();
         let path = directory.join("private.sqlite3");
-        let pool = crate::infrastructure::database::open_security(&path).await.unwrap();
+        let pool = crate::infrastructure::database::open(&path).await.unwrap();
         sqlx::query("INSERT INTO local_capability_grants VALUES ('wecom','capability','route','target','effect','digest')")
             .execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO capability_audit(request_id, app, capability, route, target, effect, parameters, decision) VALUES ('request','wecom','capability','route','target','effect','digest','intent')")
@@ -255,7 +255,7 @@ mod tests {
         write(&pool, &global(), [3.0, 4.0]).await.unwrap();
         write(&pool, &content(1), [5.0, 6.0]).await.unwrap();
         pool.close().await;
-        let pool = crate::infrastructure::database::open_security(&path).await.unwrap();
+        let pool = crate::infrastructure::database::open(&path).await.unwrap();
         initialize(&pool).await.unwrap();
         assert_eq!(read(&pool, &global()).await.unwrap(), Some([3.0, 4.0]));
         assert_eq!(read(&pool, &content(1)).await.unwrap(), Some([5.0, 6.0]));
@@ -272,14 +272,14 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("desk-agent-cache-fault-{}", uuid::Uuid::new_v4()));
         std::fs::DirBuilder::new().mode(0o700).create(&directory).unwrap();
         let path = directory.join("private.sqlite3");
-        let pool = crate::infrastructure::database::open_security(&path).await.unwrap();
+        let pool = crate::infrastructure::database::open(&path).await.unwrap();
         sqlx::query("INSERT INTO local_capability_grants VALUES ('wecom','capability','route','target','effect','digest')")
             .execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE coordinate_cache").execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE coordinate_cache (id INTEGER PRIMARY KEY)").execute(&pool).await.unwrap();
         pool.close().await;
 
-        let reopened = crate::infrastructure::database::open_security(&path).await;
+        let reopened = crate::infrastructure::database::open(&path).await;
         if let Ok(pool) = &reopened {
             assert!(read(pool, &global()).await.is_err());
             assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM local_capability_grants").fetch_one(pool).await.unwrap(), 1);

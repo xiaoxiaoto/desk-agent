@@ -18,13 +18,19 @@ enum Command {
     Status,
     Capabilities,
     Serve,
+    /// Install-time setup: request macOS permissions once and record standing grants for every capability.
+    Setup {
+        /// Remove all standing capability grants instead.
+        #[arg(long)]
+        revoke: bool,
+    },
     /// Submit a task; repeat --message and --instruction to preserve order.
     Rpa {
         #[arg(long)]
         app: String,
         #[arg(long, required_unless_present = "instruction")]
         message: Vec<String>,
-        /// process_launch; window_center; window_capture; vision_detect=JSON_ARRAY; screenshot_coordinates_convert=JSON_OBJECT; click_button=JSON_OBJECT; click_focus=JSON_OBJECT; ax_inspect=JSON_OBJECT; keyboard_text_input=JSON_OBJECT; keyboard_key_input=JSON_OBJECT; send_message_by_nickname=JSON_OBJECT
+        /// process_launch; window_center; window_capture; vision_detect=JSON_ARRAY; screenshot_coordinates_convert=JSON_OBJECT; click_button=JSON_OBJECT; click_focus=JSON_OBJECT; ax_inspect=JSON_OBJECT; keyboard_text_input=JSON_OBJECT; keyboard_key_input=JSON_OBJECT; send_message_by_nickname=JSON_OBJECT (messages: text/content or image/file with absolute path, filename and mime_type; images PNG/JPEG)
         #[arg(long)]
         instruction: Vec<String>,
     },
@@ -108,6 +114,14 @@ pub async fn run() -> anyhow::Result<()> {
             let runtime = std::env::current_exe()?.with_file_name("desk-agent");
             let status = tokio::process::Command::new(runtime).status().await?;
             if !status.success() { bail!("runtime exited with {status}"); }
+        }
+        Command::Setup { revoke } => {
+            let runtime = std::env::current_exe()?.with_file_name("desk-agent");
+            let mut command = tokio::process::Command::new(runtime);
+            command.arg("setup");
+            if revoke { command.arg("--revoke"); }
+            let status = command.status().await?;
+            if !status.success() { bail!("setup exited with {status}"); }
         }
         Command::Status => show_ipc(IpcRequest::Status { method: ipc::StatusMethod::Status }).await?,
         Command::Capabilities => capabilities().await?,
@@ -262,6 +276,8 @@ mod tests {
                 interval_ms: 1000,
             })
         );
+        let media = r#"send_message_by_nickname={"nickname":"Alice","messages":[{"type":"image","path":"/tmp/a.png","filename":"a.png","mime_type":"image/png"},{"type":"file","path":"/tmp/a.pdf","filename":"a.pdf","mime_type":"application/pdf"}],"interval_ms":0}"#;
+        assert!(instruction(media).is_ok());
         for params in [
             r#"{"nickname":"Alice","messages":[{"type":"text","content":"hi"}]}"#,
             r#"{"nickname":"Alice","messages":["hi"],"interval_ms":0}"#,
